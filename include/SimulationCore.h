@@ -4,5 +4,5 @@
 
 class SimulationCore {
 public:
-  SimulationCore();
+    SimulationCore();
 };

@@ -5,22 +5,22 @@
 
 class Logger {
 public:
-  static Logger &getInstance();
+    static Logger &getInstance();
 
-  void info(const std::string &message);
-  void warn(const std::string &message);
-  void error(const std::string &message);
-  void debug(const std::string &message);
+    void info(const std::string &message);
+    void warn(const std::string &message);
+    void error(const std::string &message);
+    void debug(const std::string &message);
 
-  Logger(const Logger &) = delete;
-  Logger &operator=(const Logger &) = delete;
-  Logger(Logger &&) = delete;
-  Logger &operator=(Logger &&) = delete;
+    Logger(const Logger &) = delete;
+    Logger &operator=(const Logger &) = delete;
+    Logger(Logger &&) = delete;
+    Logger &operator=(Logger &&) = delete;
 
 private:
-  Logger();
-  ~Logger();
+    Logger();
+    ~Logger();
 
-  class Impl;
-  Impl *impl;
+    class Impl;
+    Impl *impl;
 };
