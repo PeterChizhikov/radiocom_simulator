@@ -96,12 +96,14 @@ FetchContent_Declare(
 # FetchContent_MakeAvailable(json)
 FetchContent_MakeAvailable(spdlog)
 # add_subdirectory(cache)
+add_subdirectory(modules/SignalManipulation)
 add_executable(radiocom_sim ${SOURCE_FILES})
 
 target_include_directories(radiocom_sim PRIVATE include)
 target_link_libraries(radiocom_sim
     PRIVATE
     spdlog::spdlog
+    SignalManipulation
 #     mathLib
 #     nlohmann_json::nlohmann_json
 #     PostgreSQL::PostgreSQL
