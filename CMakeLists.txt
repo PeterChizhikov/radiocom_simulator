@@ -24,26 +24,29 @@ endif()
 
 # find_package(PostgreSQL REQUIRED)
 
-# set(HEADER_FILES
+set(HEADER_FILES
+    include/Logger.h
+    include/SimulationCore.h
 #     include/Calculator.h
 #     include/Checker.h
 #     include/Parser.h 
 #     include/Printer.h
 #     include/Runner.h
 #     include/MathInfo.h
-#     include/Logger.h
 #     include/DatabaseProcessor.h
 #     include/CalculatorException.h
-# )
+# 
+)
 
 set(SOURCE_FILES 
     src/main.cpp
+    src/Logger.cpp
+    src/SimulationCore.cpp
     # src/Calculator.cpp
     # src/Checker.cpp
     # src/Parser.cpp
     # src/Printer.cpp
     # src/Runner.cpp
-    # src/Logger.cpp
     # src/DatabaseProcessor.cpp
     # src/CalculatorException.cpp
 )
@@ -63,7 +66,7 @@ set(SOURCE_FILES
 #     src/CalculatorException.cpp
 # )
 
-# include(FetchContent)
+include(FetchContent)
 
 # FetchContent_Declare(
 #     mathLib
@@ -83,27 +86,27 @@ set(SOURCE_FILES
 #     GIT_TAG v1.15.2
 # )
 
-# FetchContent_Declare(
-#     spdlog
-#     GIT_REPOSITORY https://github.com/gabime/spdlog.git
-#     GIT_TAG v1.14.1
-# )
+FetchContent_Declare(
+    spdlog
+    GIT_REPOSITORY https://github.com/gabime/spdlog.git
+    GIT_TAG v1.14.1
+)
 
 # FetchContent_MakeAvailable(mathLib)
 # FetchContent_MakeAvailable(json)
-# FetchContent_MakeAvailable(spdlog)
+FetchContent_MakeAvailable(spdlog)
 # add_subdirectory(cache)
 add_executable(radiocom_sim ${SOURCE_FILES})
 
 target_include_directories(radiocom_sim PRIVATE include)
-# target_link_libraries(radiocom_sim
-#     PRIVATE
+target_link_libraries(radiocom_sim
+    PRIVATE
+    spdlog::spdlog
 #     mathLib
 #     nlohmann_json::nlohmann_json
-#     spdlog::spdlog
 #     PostgreSQL::PostgreSQL
 #     cache_lib
-# )
+)
 
 install(TARGETS radiocom_sim RUNTIME DESTINATION bin)
 
