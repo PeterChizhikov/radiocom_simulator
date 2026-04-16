@@ -4,5 +4,7 @@
 
 class SimulationCore {
 public:
-    SimulationCore();
+    SimulationCore() = default;
+
+    void runSimulation();
 };

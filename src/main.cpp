@@ -4,7 +4,8 @@
 
 int main(int argc, char **argv) {
     try {
-        SimulationCore runner;
+        SimulationCore simCore;
+        simCore.runSimulation();
     } catch (const std::exception &e) {
         Logger::getInstance().error(std::string("Program didn't finish! Error occured: ") +
                                     e.what());
