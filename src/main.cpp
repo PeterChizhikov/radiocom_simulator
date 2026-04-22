@@ -6,9 +6,8 @@ int main(int argc, char **argv) {
     try {
         SimulationCore simCore;
         simCore.runSimulation();
-    } catch (const std::exception &e) {
-        Logger::getInstance().error(std::string("Program didn't finish! Error occured: ") +
-                                    e.what());
+    } catch (...) {
+        Logger::getInstance().error("Program didn't finish! Error occured: ");
     }
     return 0;
 }

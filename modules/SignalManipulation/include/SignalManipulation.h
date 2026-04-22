@@ -3,16 +3,17 @@
 #include <iostream>
 #include <string_view>
 #include <cstring>
+#include <vector>
 
 class SignalManipulation {
 public:
   SignalManipulation()=default;
 
-  void startEncodingManipulation();
+  void startEncodingManipulation(char* info);
   void startDecodingManipulation();
 private:
-  char testCase[31] = "Hello, world! Hamming encoding";
+  
 
-  void encodeWithHamming(char* info);
-  void decodeWithHamming();
+  std::vector<uint8_t> encodeWithHamming(char* info);
+  void decodeWithHamming(std::vector<uint8_t> signal);
 };
