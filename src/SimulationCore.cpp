@@ -1,7 +1,7 @@
 #include "SimulationCore.h"
 
 void SimulationCore::runSimulation() {
-    char testCase[31] = "Hamming";
+    char testCase[31] = "testInfoRunSimulator!";
 
     Logger::getInstance().info("Simulation started");
     SignalManipulation SignalManipulationProc;

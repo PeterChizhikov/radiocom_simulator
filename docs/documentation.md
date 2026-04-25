@@ -8,3 +8,15 @@ https://habr.com/ru/articles/140611/
 
 ![alt text](image.png)
 
+
+HAM_SIZE	Длина слова (бит)	Длина слова (байт)	Битов данных	Контрольных битов
+Hmming::4	            16 бит	            2 байта	          11 бит	       5 бит
+
+
+
+# Модуляция QPSK + OFDM
+
+![alt text](image-1.png)
+
+
+
