@@ -17,7 +17,6 @@ std::vector<uint8_t> SignalManipulation::encodeWithHamming(char* info) {
     return p; 
 }
 
-
 std::vector<QPSKSymbol> SignalManipulation::mapToQPSK(const std::vector<uint8_t>& bytes){
     std::vector<QPSKSymbol> symbols;
 
@@ -38,6 +37,7 @@ std::vector<QPSKSymbol> SignalManipulation::mapToQPSK(const std::vector<uint8_t>
     }
     return symbols;
 }
+
 std::vector<std::complex<double>> SignalManipulation::mapToSubcarriers(const std::vector<QPSKSymbol>& qpskSymbols) {
     const int FFT_SIZE = 256;
 
@@ -89,6 +89,7 @@ std::vector<std::complex<double>> SignalManipulation::createOfdmSymbol(const std
 
     return ofdmSymbolWithCP;
 }
+//TODO (Petr 25.04.2026) Вынести в отедльный модуль запись в файл
 
 void SignalManipulation::saveSignalToBin(const std::vector<std::complex<double>>& signal, const std::string& filename) {
     std::ofstream outFile(filename, std::ios::binary);
@@ -128,10 +129,6 @@ void SignalManipulation::startDecodingManipulation(){
   
 }
 
-
-
-
-
 void SignalManipulation::printBits(const uint8_t* data, size_t size, const std::string& prefix) {
     std::cout << prefix << " (" << size << " bytes): ";
     for (size_t i = 0; i < size; i++) {
@@ -142,8 +139,6 @@ void SignalManipulation::printBits(const uint8_t* data, size_t size, const std::
     }
     std::cout << std::endl;
 }
-
-
 
 void SignalManipulation::decodeWithHamming(std::vector<uint8_t> signal){
     size_t signalCodeSize = signal.size();
