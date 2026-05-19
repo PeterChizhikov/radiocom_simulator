@@ -25,7 +25,6 @@ endif()
 # find_package(PostgreSQL REQUIRED)
 
 set(HEADER_FILES
-    include/Logger.h
     include/SimulationCore.h
 #     include/Calculator.h
 #     include/Checker.h
@@ -40,7 +39,6 @@ set(HEADER_FILES
 
 set(SOURCE_FILES 
     src/main.cpp
-    src/Logger.cpp
     src/SimulationCore.cpp
     # src/Calculator.cpp
     # src/Checker.cpp
@@ -86,25 +84,24 @@ include(FetchContent)
 #     GIT_TAG v1.15.2
 # )
 
-FetchContent_Declare(
-    spdlog
-    GIT_REPOSITORY https://github.com/gabime/spdlog.git
-    GIT_TAG v1.14.1
-)
+
 
 # FetchContent_MakeAvailable(mathLib)
 # FetchContent_MakeAvailable(json)
-FetchContent_MakeAvailable(spdlog)
+
 # add_subdirectory(cache)
 add_subdirectory(src/modules/SignalManipulation)
+add_subdirectory(src/modules/Logger)
+add_subdirectory(src/modules/SignalFileIO)
 
 add_executable(radiocom_sim ${SOURCE_FILES})
 
 target_include_directories(radiocom_sim PRIVATE include)
 target_link_libraries(radiocom_sim
     PRIVATE
-    spdlog::spdlog
     SignalManipulation
+    Logger
+    SignalFileIO
 #     mathLib
 #     nlohmann_json::nlohmann_json
 #     PostgreSQL::PostgreSQL

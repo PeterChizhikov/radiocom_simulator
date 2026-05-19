@@ -12,4 +12,4 @@ add_library(SignalManipulation STATIC
 
 
 target_include_directories(SignalManipulation PUBLIC include ${FFTW3_INCLUDE_DIRS})
-target_link_libraries(SignalManipulation PRIVATE ${FFTW3_LIBRARIES})
+target_link_libraries(SignalManipulation PRIVATE Logger SignalFileIO ${FFTW3_LIBRARIES})

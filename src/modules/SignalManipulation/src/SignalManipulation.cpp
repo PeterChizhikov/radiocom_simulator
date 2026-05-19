@@ -2,18 +2,15 @@
 
 std::vector<uint8_t> SignalManipulation::encodeWithHamming(char* info) {
     size_t actualSize = strlen(info) + 1; 
-    std::cout << "actualInformationSize(number of verbs): " << actualSize << std::endl;
-    printBits(reinterpret_cast<uint8_t*>(info), actualSize, "Original data (binary)");
+    Logger::getInstance().info("actualInformationSize(number of verbs): "+std::to_string(actualSize));
+    //printBits(reinterpret_cast<uint8_t*>(info), actualSize, "Original data (binary)");
     size_t signalCodeSize = Hamming4::encodedSize(actualSize);
-    std::cout << "signalCodeSize(In bytes): " << signalCodeSize << std::endl;
+    Logger::getInstance().info("signalCodeSize(In bytes): "+std::to_string(signalCodeSize));
     std::vector<uint8_t> p(signalCodeSize);
 
     Hamming4::encode(p.data(), reinterpret_cast<uint8_t*>(info), actualSize);
-    printBits(p.data(), signalCodeSize, "After Hamming encode (before mix)");
+    //printBits(p.data(), signalCodeSize, "After Hamming encode (before mix)");
     
-    //Hamming4::mix8(p.data(), signalCodeSize);
-    //printBits(p.data(), signalCodeSize, "After mix8 (final)");
-
     return p; 
 }
 
@@ -89,71 +86,144 @@ std::vector<std::complex<double>> SignalManipulation::createOfdmSymbol(const std
 
     return ofdmSymbolWithCP;
 }
-//TODO (Petr 25.04.2026) Вынести в отедльный модуль запись в файл
-
-void SignalManipulation::saveSignalToBin(const std::vector<std::complex<double>>& signal, const std::string& filename) {
-    std::ofstream outFile(filename, std::ios::binary);
-    
-    if (!outFile) {
-        std::cerr << "Error opening file for writing!" << std::endl;
-        return;
-    }
-
-    for (const auto& sample : signal) {
-        // GNU Radio ожидает float (32 бита), а у нас double (64 бита)
-        // Приводим типы для совместимости
-        float re = static_cast<float>(sample.real());
-        float im = static_cast<float>(sample.imag());
-        
-        outFile.write(reinterpret_cast<const char*>(&re), sizeof(float));
-        outFile.write(reinterpret_cast<const char*>(&im), sizeof(float));
-    }
-
-    outFile.close();
-    std::cout << "Signal saved to " << filename << " (" << signal.size() << " samples)" << std::endl;
-}
 
 void SignalManipulation::startEncodingManipulation(char* info){
     std::vector<uint8_t> encodedSignal = encodeWithHamming(info);
     auto qpskSymbols = mapToQPSK(encodedSignal);
 
-    std::cout << "qpskSymbols.size: " << qpskSymbols.size() << std::endl;
+    Logger::getInstance().info("qpskSymbols.size: "+ std::to_string(qpskSymbols.size()));
 
     auto mappingToSubcarriers = mapToSubcarriers(qpskSymbols);
     auto ofdmsybmols = createOfdmSymbol(mappingToSubcarriers);
-    saveSignalToBin(ofdmsybmols,"test");
-    decodeWithHamming(encodedSignal);
+    SignalFileIO::saveToBin(ofdmsybmols, "test");
 }
 
+
+std::vector<std::complex<double>> SignalManipulation::demodulateOfdmSymbol(const std::vector<std::complex<double>>& ofdmSymbolWithCP) {
+    const int FFT_SIZE = 256;
+    const int CP_SIZE = 18;
+
+    if (ofdmSymbolWithCP.size() < static_cast<size_t>(FFT_SIZE + CP_SIZE)) {
+        Logger::getInstance().error("Error: Signal is too short to extract OFDM symbol!");
+        return std::vector<std::complex<double>>(FFT_SIZE, std::complex<double>(0.0, 0.0));
+    }
+
+    std::vector<std::complex<double>> timeDomain(FFT_SIZE);
+    for (int i = 0; i < FFT_SIZE; ++i) {
+        timeDomain[i] = ofdmSymbolWithCP[CP_SIZE + i];
+    }
+
+    std::vector<std::complex<double>> fftBins(FFT_SIZE);
+
+    fftw_plan plan = fftw_plan_dft_1d(FFT_SIZE,
+        reinterpret_cast<fftw_complex*>(timeDomain.data()),
+        reinterpret_cast<fftw_complex*>(fftBins.data()),
+        FFTW_FORWARD, FFTW_ESTIMATE);
+
+    fftw_execute(plan);
+    fftw_destroy_plan(plan);
+
+    return fftBins;
+}
+
+std::vector<QPSKSymbol> SignalManipulation::demapFromSubcarriers(const std::vector<std::complex<double>>& fftBins, size_t expectedSymbolsCount) {
+    std::vector<QPSKSymbol> qpskSymbols;
+    qpskSymbols.reserve(expectedSymbolsCount);
+
+    int halfSize = static_cast<int>(expectedSymbolsCount) / 2;
+    if (halfSize > 64) halfSize = 64;
+
+    for (int i = 0; i < halfSize; ++i) {
+        qpskSymbols.push_back({fftBins[1 + i]});
+    }
+
+    for (int i = 0; i < halfSize; ++i) {
+        qpskSymbols.push_back({fftBins[256 - halfSize + i]});
+    }
+
+    return qpskSymbols;
+}
+
+std::vector<uint8_t> SignalManipulation::demapFromQPSK(const std::vector<QPSKSymbol>& qpskSymbols) {
+    std::vector<uint8_t> bytes;
+    bytes.reserve(qpskSymbols.size() / 4); 
+
+    uint8_t currentByte = 0;
+    int bitShift = 0;
+
+    for (const auto& symbol : qpskSymbols) {
+        double I = symbol.value.real();
+        double Q = symbol.value.imag();
+        uint8_t pair = 0b00;
+
+        if (I >= 0 && Q >= 0)       pair = 0b00; 
+        else if (I < 0 && Q >= 0)  pair = 0b01; 
+        else if (I < 0 && Q < 0)   pair = 0b11; 
+        else if (I >= 0 && Q < 0)  pair = 0b10; 
+
+        currentByte |= (pair << bitShift);
+        bitShift += 2;
+
+        if (bitShift == 8) {
+            bytes.push_back(currentByte);
+            currentByte = 0;
+            bitShift = 0;
+        }
+    }
+    return bytes;
+}
 void SignalManipulation::startDecodingManipulation(){
-  
+    auto loadedSignal = SignalFileIO::readFromBin("test");
+    if (loadedSignal.empty()) {
+        Logger::getInstance().error(" Decoding aborted: file is empty or missing. ");
+        return;
+    }
+
+    auto fftBins = demodulateOfdmSymbol(loadedSignal);
+
+    size_t expectedQpskCount = 128; 
+    auto recoveredQpsk = demapFromSubcarriers(fftBins, expectedQpskCount);
+    Logger::getInstance().info("Recovered QPSK symbols count: "+ std::to_string(recoveredQpsk.size()));
+
+    auto encodedBytes = demapFromQPSK(recoveredQpsk);
+    //printBits(encodedBytes.data(), encodedBytes.size(), "Decoded bytes before Hamming (binary)");
+
+    size_t dlen = Hamming4::decodedSize(encodedBytes.size());
+    Logger::getInstance().info("Expected original text length: "+ std::to_string(dlen) + " bytes");
+
+    bool success = Hamming4::decode(encodedBytes.data(), encodedBytes.size());
+
+    if (success) {
+        Logger::getInstance().info("Decoded text: " + 
+            std::string(reinterpret_cast<char*>(encodedBytes.data()), dlen));
+    } else {
+        Logger::getInstance().error("Hamming decoding failed. Too many errors in channel ");
+    }
 }
 
 void SignalManipulation::printBits(const uint8_t* data, size_t size, const std::string& prefix) {
-    std::cout << prefix << " (" << size << " bytes): ";
+    Logger::getInstance().info(prefix+ " (" + std::to_string(size) + " bytes):");
     for (size_t i = 0; i < size; i++) {
         for (int bit = 7; bit >= 0; bit--) {  
-            std::cout << ((data[i] >> bit) & 1);
+            Logger::getInstance().info(std::to_string(((data[i] >> bit) & 1)));
         }
-        if (i < size - 1) std::cout << " ";  // разделитель 
+        if (i < size - 1) Logger::getInstance().info(" ");  // разделитель 
     }
-    std::cout << std::endl;
+    Logger::getInstance().info("\n");
 }
 
 void SignalManipulation::decodeWithHamming(std::vector<uint8_t> signal){
     size_t signalCodeSize = signal.size();
 
-    //Hamming4::unmix8(signal.data(), signalCodeSize);
-
     size_t dlen = Hamming4::decodedSize(signalCodeSize);
-    std::cout << "Expected decode len: " << dlen << std::endl;
+    Logger::getInstance().info("Expected decode len: " + std::to_string(dlen));
 
     bool res = Hamming4::decode(signal.data(), signalCodeSize);
 
     if (res) {
-        std::cout << "Decoded: " << std::string_view(reinterpret_cast<char*>(signal.data()), dlen) << std::endl;
+        Logger::getInstance().info("Decoded: " + std::string(reinterpret_cast<char*>(signal.data()), dlen) + "\n ");
     } else {
-        std::cerr << "Error: Could not decode (too many errors)" << std::endl;
+        Logger::getInstance().error("Error: Could not decode (too many errors) ");
     }
 }
 
