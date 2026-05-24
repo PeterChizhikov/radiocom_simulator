@@ -1,6 +1,7 @@
 #pragma once
 #include "Logger.h"
 #include "SignalManipulation.h"
+#include <vector>
 
 class SimulationCore {
 public:

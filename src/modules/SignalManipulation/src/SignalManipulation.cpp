@@ -1,5 +1,8 @@
 #include "SignalManipulation.h"
 
+SignalManipulation::SignalManipulation(std::string codeType)  : codeType(codeType) {
+}
+
 std::vector<uint8_t> SignalManipulation::encodeWithHamming(char* info) {
     size_t actualSize = strlen(info) + 1; 
     Logger::getInstance().info("actualInformationSize(number of verbs): "+std::to_string(actualSize));
@@ -7,8 +10,8 @@ std::vector<uint8_t> SignalManipulation::encodeWithHamming(char* info) {
     size_t signalCodeSize = Hamming4::encodedSize(actualSize);
     Logger::getInstance().info("signalCodeSize(In bytes): "+std::to_string(signalCodeSize));
     std::vector<uint8_t> p(signalCodeSize);
-
     Hamming4::encode(p.data(), reinterpret_cast<uint8_t*>(info), actualSize);
+    originalBytes = p;
     //printBits(p.data(), signalCodeSize, "After Hamming encode (before mix)");
     
     return p; 
@@ -87,17 +90,40 @@ std::vector<std::complex<double>> SignalManipulation::createOfdmSymbol(const std
     return ofdmSymbolWithCP;
 }
 
-void SignalManipulation::startEncodingManipulation(char* info){
+std::vector<std::complex<double>> SignalManipulation::addAWGN(const std::vector<std::complex<double>>& signal, double snr_db) {
+    double signal_power = 0.0;
+    for (const auto& s : signal) {
+        signal_power += std::norm(s);
+    }
+    signal_power /= signal.size();
+
+    double snr_linear = std::pow(10.0, snr_db / 10.0);
+    double noise_power = signal_power / snr_linear;
+    double noise_std = std::sqrt(noise_power / 2.0); 
+
+    static std::mt19937 gen(std::random_device{}());
+    std::normal_distribution<double> dist(0.0, noise_std);
+
+    std::vector<std::complex<double>> noisy_signal = signal;
+    for (auto& sample : noisy_signal) {
+        sample += std::complex<double>(dist(gen), dist(gen));
+    }
+    return noisy_signal;
+}
+
+void SignalManipulation::startEncodingManipulation(char* info, double snr){
     std::vector<uint8_t> encodedSignal = encodeWithHamming(info);
     auto qpskSymbols = mapToQPSK(encodedSignal);
 
     Logger::getInstance().info("qpskSymbols.size: "+ std::to_string(qpskSymbols.size()));
 
     auto mappingToSubcarriers = mapToSubcarriers(qpskSymbols);
-    auto ofdmsybmols = createOfdmSymbol(mappingToSubcarriers);
-    SignalFileIO::saveToBin(ofdmsybmols, "test");
-}
+    std::vector<std::complex<double>> ofdmsybmols = createOfdmSymbol(mappingToSubcarriers);
 
+    auto noisySignal = addAWGN(ofdmsybmols, snr);
+
+    SignalFileIO::saveToBin(noisySignal, "test");
+}
 
 std::vector<std::complex<double>> SignalManipulation::demodulateOfdmSymbol(const std::vector<std::complex<double>>& ofdmSymbolWithCP) {
     const int FFT_SIZE = 256;
@@ -172,7 +198,26 @@ std::vector<uint8_t> SignalManipulation::demapFromQPSK(const std::vector<QPSKSym
     }
     return bytes;
 }
-void SignalManipulation::startDecodingManipulation(){
+
+double SignalManipulation::calculateBER(const std::vector<uint8_t>& original, const std::vector<uint8_t>& received)
+{
+    if (original.size() != received.size()) {
+        throw std::runtime_error("BER size mismatch");
+    }
+
+    size_t errors = 0;
+
+    for (size_t i = 0; i < original.size(); ++i) {
+        errors += __builtin_popcount(
+            original[i] ^ received[i]
+        );
+    }
+
+    return static_cast<double>(errors) /
+           (original.size() * 8);
+}
+
+void SignalManipulation::startDecodingManipulation(bool &resultStatus, double &BER){
     auto loadedSignal = SignalFileIO::readFromBin("test");
     if (loadedSignal.empty()) {
         Logger::getInstance().error(" Decoding aborted: file is empty or missing. ");
@@ -186,19 +231,17 @@ void SignalManipulation::startDecodingManipulation(){
     Logger::getInstance().info("Recovered QPSK symbols count: "+ std::to_string(recoveredQpsk.size()));
 
     auto encodedBytes = demapFromQPSK(recoveredQpsk);
-    //printBits(encodedBytes.data(), encodedBytes.size(), "Decoded bytes before Hamming (binary)");
-
     size_t dlen = Hamming4::decodedSize(encodedBytes.size());
     Logger::getInstance().info("Expected original text length: "+ std::to_string(dlen) + " bytes");
 
+    // BER сравниваем originalBytes (сохранённые при кодировании) с encodedBytes
+    BER = calculateBER(originalBytes, encodedBytes);
     bool success = Hamming4::decode(encodedBytes.data(), encodedBytes.size());
-
     if (success) {
         Logger::getInstance().info("Decoded text: " + 
             std::string(reinterpret_cast<char*>(encodedBytes.data()), dlen));
-    } else {
-        Logger::getInstance().error("Hamming decoding failed. Too many errors in channel ");
     }
+    resultStatus = success;
 }
 
 void SignalManipulation::printBits(const uint8_t* data, size_t size, const std::string& prefix) {
