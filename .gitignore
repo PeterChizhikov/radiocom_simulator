@@ -2,3 +2,7 @@ compile_commands.json
 /.vscode
 CMakePresets.json
 **.csv
+/build
+# Perf профилирование
+perf.data
+perf.data.old

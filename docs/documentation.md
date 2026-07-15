@@ -19,4 +19,10 @@ Hmming::4	            16 бит	            2 байта	          11 бит	   
 ![alt text](image-1.png)
 
 
+Профилирование:
+valgrind --leak-check=full --show-leak-kinds=all --track-origins=yes ./your_program
+
+perf stat ./my_program
+perf record -g ./my_program
+perf report
 
