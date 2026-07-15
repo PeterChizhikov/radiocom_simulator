@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Logger.h"
+#include "Types.h"
 #include <fstream>
 #include <vector>
 #include <complex>
@@ -10,6 +11,6 @@ class SignalFileIO {
 public:
     SignalFileIO() = delete;
 
-    static void saveToBin(const std::vector<std::complex<double>>& signal, const std::string& filename);
-    static std::vector<std::complex<double>> readFromBin(const std::string& filename);
+    static void saveToBin(const SignalType& signal, const std::string& filename);
+    static SignalType readFromBin(const std::string& filename);
 };

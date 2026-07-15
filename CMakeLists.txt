@@ -26,6 +26,7 @@ endif()
 
 set(HEADER_FILES
     include/SimulationCore.h
+    include/Types.h
 #     include/Calculator.h
 #     include/Checker.h
 #     include/Parser.h 

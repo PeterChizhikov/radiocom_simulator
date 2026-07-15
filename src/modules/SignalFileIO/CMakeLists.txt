@@ -7,5 +7,5 @@ add_library(SignalFileIO STATIC
 
 
 
-target_include_directories(SignalFileIO PUBLIC include)
+target_include_directories(SignalFileIO PUBLIC include ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(SignalFileIO PRIVATE Logger )

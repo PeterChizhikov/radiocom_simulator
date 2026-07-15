@@ -38,10 +38,10 @@ std::vector<QPSKSymbol> SignalManipulation::mapToQPSK(const std::vector<uint8_t>
     return symbols;
 }
 
-std::vector<std::complex<double>> SignalManipulation::mapToSubcarriers(const std::vector<QPSKSymbol>& qpskSymbols) {
+SignalType SignalManipulation::mapToSubcarriers(const std::vector<QPSKSymbol>& qpskSymbols) {
     const int FFT_SIZE = 256;
 
-    std::vector<std::complex<double>> fftBins(FFT_SIZE, std::complex<double>(0.0, 0.0));
+    SignalType fftBins(FFT_SIZE, std::complex<double>(0.0, 0.0));
 
     int halfSize = static_cast<int>(qpskSymbols.size()) / 2;
     if (halfSize > 64) halfSize = 64; 
@@ -57,11 +57,11 @@ std::vector<std::complex<double>> SignalManipulation::mapToSubcarriers(const std
     return fftBins;
 }
 
-std::vector<std::complex<double>> SignalManipulation::createOfdmSymbol(const std::vector<std::complex<double>>& fftBins) {
+SignalType SignalManipulation::createOfdmSymbol(const SignalType& fftBins) {
     const int FFT_SIZE = 256;
     const int CP_SIZE = 18; 
     
-    std::vector<std::complex<double>> timeDomain(FFT_SIZE);
+    SignalType timeDomain(FFT_SIZE);
     
     fftw_plan plan = fftw_plan_dft_1d(FFT_SIZE, 
         reinterpret_cast<fftw_complex*>(const_cast<std::complex<double>*>(fftBins.data())), 
@@ -74,7 +74,7 @@ std::vector<std::complex<double>> SignalManipulation::createOfdmSymbol(const std
         timeDomain[i] /= static_cast<double>(FFT_SIZE);
     }
 
-    std::vector<std::complex<double>> ofdmSymbolWithCP;
+    SignalType ofdmSymbolWithCP;
     ofdmSymbolWithCP.reserve(FFT_SIZE + CP_SIZE);
 
     for (int i = FFT_SIZE - CP_SIZE; i < FFT_SIZE; ++i) {
@@ -90,7 +90,7 @@ std::vector<std::complex<double>> SignalManipulation::createOfdmSymbol(const std
     return ofdmSymbolWithCP;
 }
 
-std::vector<std::complex<double>> SignalManipulation::addAWGN(const std::vector<std::complex<double>>& signal, double snr_db) {
+SignalType SignalManipulation::addAWGN(const SignalType& signal, const double snr_db) {
     double signal_power = 0.0;
     for (const auto& s : signal) {
         signal_power += std::norm(s);
@@ -104,42 +104,42 @@ std::vector<std::complex<double>> SignalManipulation::addAWGN(const std::vector<
     static std::mt19937 gen(std::random_device{}());
     std::normal_distribution<double> dist(0.0, noise_std);
 
-    std::vector<std::complex<double>> noisy_signal = signal;
+    SignalType noisy_signal = signal;
     for (auto& sample : noisy_signal) {
         sample += std::complex<double>(dist(gen), dist(gen));
     }
     return noisy_signal;
 }
 
-void SignalManipulation::startEncodingManipulation(char* info, double snr){
+void SignalManipulation::startEncodingManipulation(char* info,const double snr){
     std::vector<uint8_t> encodedSignal = encodeWithHamming(info);
     auto qpskSymbols = mapToQPSK(encodedSignal);
 
     Logger::getInstance().info("qpskSymbols.size: "+ std::to_string(qpskSymbols.size()));
 
     auto mappingToSubcarriers = mapToSubcarriers(qpskSymbols);
-    std::vector<std::complex<double>> ofdmsybmols = createOfdmSymbol(mappingToSubcarriers);
+    SignalType ofdmsybmols = createOfdmSymbol(mappingToSubcarriers);
 
     auto noisySignal = addAWGN(ofdmsybmols, snr);
 
     SignalFileIO::saveToBin(noisySignal, "test");
 }
 
-std::vector<std::complex<double>> SignalManipulation::demodulateOfdmSymbol(const std::vector<std::complex<double>>& ofdmSymbolWithCP) {
+SignalType SignalManipulation::demodulateOfdmSymbol(const SignalType& ofdmSymbolWithCP) {
     const int FFT_SIZE = 256;
     const int CP_SIZE = 18;
 
     if (ofdmSymbolWithCP.size() < static_cast<size_t>(FFT_SIZE + CP_SIZE)) {
         Logger::getInstance().error("Error: Signal is too short to extract OFDM symbol!");
-        return std::vector<std::complex<double>>(FFT_SIZE, std::complex<double>(0.0, 0.0));
+        return SignalType(FFT_SIZE, std::complex<double>(0.0, 0.0));
     }
 
-    std::vector<std::complex<double>> timeDomain(FFT_SIZE);
+    SignalType timeDomain(FFT_SIZE);
     for (int i = 0; i < FFT_SIZE; ++i) {
         timeDomain[i] = ofdmSymbolWithCP[CP_SIZE + i];
     }
 
-    std::vector<std::complex<double>> fftBins(FFT_SIZE);
+    SignalType fftBins(FFT_SIZE);
 
     fftw_plan plan = fftw_plan_dft_1d(FFT_SIZE,
         reinterpret_cast<fftw_complex*>(timeDomain.data()),
@@ -152,7 +152,7 @@ std::vector<std::complex<double>> SignalManipulation::demodulateOfdmSymbol(const
     return fftBins;
 }
 
-std::vector<QPSKSymbol> SignalManipulation::demapFromSubcarriers(const std::vector<std::complex<double>>& fftBins, size_t expectedSymbolsCount) {
+std::vector<QPSKSymbol> SignalManipulation::demapFromSubcarriers(const SignalType& fftBins, size_t expectedSymbolsCount) {
     std::vector<QPSKSymbol> qpskSymbols;
     qpskSymbols.reserve(expectedSymbolsCount);
 
@@ -244,7 +244,7 @@ void SignalManipulation::startDecodingManipulation(bool &resultStatus, double &B
     resultStatus = success;
 }
 
-void SignalManipulation::printBits(const uint8_t* data, size_t size, const std::string& prefix) {
+void SignalManipulation::printBits(const uint8_t* data, const size_t size, const std::string& prefix) {
     Logger::getInstance().info(prefix+ " (" + std::to_string(size) + " bytes):");
     for (size_t i = 0; i < size; i++) {
         for (int bit = 7; bit >= 0; bit--) {  

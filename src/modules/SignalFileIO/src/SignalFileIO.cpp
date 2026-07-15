@@ -1,7 +1,7 @@
 #include "SignalFileIO.h"
 
 
-void SignalFileIO::saveToBin(const std::vector<std::complex<double>>& signal, const std::string& filename) {
+void SignalFileIO::saveToBin(const SignalType& signal, const std::string& filename) {
     std::ofstream outFile(filename, std::ios::binary);
     
     if (!outFile) {
@@ -21,9 +21,9 @@ void SignalFileIO::saveToBin(const std::vector<std::complex<double>>& signal, co
     Logger::getInstance().info("Signal saved to " + filename + " (" + std::to_string(signal.size()) + " samples)");
 }
 
-std::vector<std::complex<double>> SignalFileIO::readFromBin(const std::string& filename) {
+SignalType SignalFileIO::readFromBin(const std::string& filename) {
     std::ifstream inFile(filename, std::ios::binary);
-    std::vector<std::complex<double>> signal;
+    SignalType signal;
 
     if (!inFile) {
         Logger::getInstance().error("Error opening file for reading: " + filename);
