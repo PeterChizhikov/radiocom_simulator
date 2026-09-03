@@ -97,12 +97,16 @@ add_subdirectory(src/modules/SignalFileIO)
 
 add_executable(radiocom_sim ${SOURCE_FILES})
 
-target_include_directories(radiocom_sim PRIVATE include)
+target_include_directories(radiocom_sim PRIVATE 
+include
+${FFTW3_INCLUDE_DIRS})
+target_link_directories(radiocom_sim PRIVATE ${FFTW3_LIBRARY_DIRS})
 target_link_libraries(radiocom_sim
     PRIVATE
     SignalManipulation
     Logger
     SignalFileIO
+    ${FFTW3_LIBRARIES}
 #     mathLib
 #     nlohmann_json::nlohmann_json
 #     PostgreSQL::PostgreSQL
