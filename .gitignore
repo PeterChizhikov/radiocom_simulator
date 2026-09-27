@@ -6,3 +6,8 @@ CMakePresets.json
 # Perf профилирование
 perf.data
 perf.data.old
+# macOS
+.DS_Store
+
+# Signal file written by radiocom_sim
+/test

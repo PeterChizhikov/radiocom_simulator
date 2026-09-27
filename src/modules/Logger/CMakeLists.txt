@@ -1,9 +1,3 @@
-
-add_library(Logger STATIC 
-    src/Logger.cpp
-    include/Logger.h
-)
-
 include(FetchContent)
 FetchContent_Declare(
     spdlog
@@ -12,5 +6,8 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(spdlog)
 
-target_include_directories(Logger PUBLIC include)
-target_link_libraries(Logger PRIVATE spdlog::spdlog)
+add_library(Logger STATIC
+    Logger.cpp
+)
+target_include_directories(Logger PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(Logger PRIVATE spdlog::spdlog ProjectWarnings)
