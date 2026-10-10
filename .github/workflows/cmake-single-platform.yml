@@ -36,6 +36,8 @@ jobs:
         brew update
         brew install fftw cmake
         brew tap tfcollins/formulae
+        # Новые версии Homebrew не загружают формулы из сторонних tap без явного доверия
+        brew trust tfcollins/formulae
         brew install libiio
 
     # Конфигурация без лишних флагов
