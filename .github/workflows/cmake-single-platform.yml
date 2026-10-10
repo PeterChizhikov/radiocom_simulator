@@ -22,19 +22,21 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    # Установка FFTW3 для Linux
+    # Установка FFTW3 и libiio для Linux
     - name: Install dependencies (Ubuntu)
       if: matrix.os == 'ubuntu-latest'
       run: |
         sudo apt-get update
-        sudo apt-get install -y build-essential cmake libfftw3-dev
+        sudo apt-get install -y build-essential cmake libfftw3-dev libiio-dev
 
-    # Установка FFTW3 для macOS
+    # Установка FFTW3 и libiio для macOS (libiio есть только в tap tfcollins)
     - name: Install dependencies (macOS)
       if: matrix.os == 'macos-latest'
       run: |
         brew update
         brew install fftw cmake
+        brew tap tfcollins/formulae
+        brew install libiio
 
     # Конфигурация без лишних флагов
     - name: Configure CMake

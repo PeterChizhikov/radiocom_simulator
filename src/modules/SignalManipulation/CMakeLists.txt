@@ -1,5 +1,5 @@
 find_package(PkgConfig REQUIRED)
-pkg_check_modules(FFTW3 REQUIRED IMPORTED_TARGET fftw3)
+pkg_check_modules(FFTW3 REQUIRED IMPORTED_TARGET GLOBAL fftw3)
 
 add_library(SignalManipulation STATIC
     SignalManipulation.cpp

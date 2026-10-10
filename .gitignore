@@ -12,3 +12,6 @@ perf.data.old
 # Signal file written by radiocom_sim
 /test
 CLAUDE.md
+
+# Received signal file written by radiocom_txrx
+rx.iq
