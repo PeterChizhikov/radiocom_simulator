@@ -32,8 +32,6 @@ constexpr double toneAmplitude = 0.5;
 constexpr size_t receiveSize = 65536;
 // Вблизи нуля частоты лежат постоянная составляющая и утечка гетеродина, пик там не ищем
 constexpr double dcExclusionHz = 10'000.0;
-// Окно поиска тона вокруг ожидаемой частоты: слабый тон теряется за сильными посторонними сигналами в полосе
-constexpr double toneSearchHz = 2'000.0;
 
 struct CommandLineOptions
 {
@@ -193,18 +191,12 @@ void reportSignal(const Radiocom::Signal_t& signal, double sampleRateHz, Logging
     { return bin < power.size() / 2 ? double(bin) * binHz : (double(bin) - double(power.size())) * binHz; };
 
     // Поиск начинается с бина ожидаемого тона, а не с нулевого, где постоянная составляющая
-    size_t toneBin = size_t(std::lround(toneOffsetHz / binHz));
-    size_t peakBin = toneBin;
+    size_t peakBin = size_t(std::lround(toneOffsetHz / binHz));
     for (size_t bin = 0; bin < power.size(); ++bin)
     {
-        const double frequencyHz = toFrequency(bin);
-        if (std::abs(frequencyHz) > dcExclusionHz && power[bin] > power[peakBin])
+        if (std::abs(toFrequency(bin)) > dcExclusionHz && power[bin] > power[peakBin])
         {
             peakBin = bin;
-        }
-        if (std::abs(frequencyHz - toneOffsetHz) <= toneSearchHz && power[bin] > power[toneBin])
-        {
-            toneBin = bin;
         }
     }
 
@@ -212,12 +204,11 @@ void reportSignal(const Radiocom::Signal_t& signal, double sampleRateHz, Logging
     std::ranges::nth_element(sorted, sorted.begin() + std::ptrdiff_t(sorted.size() / 2));
     const double noiseFloor = sorted[sorted.size() / 2];
 
-    const double toneHz = toFrequency(toneBin);
-    logger.Info(std::format("Tone: {:.0f} Hz (expected {:.0f} Hz, offset {:.0f} Hz, resolution {:.0f} Hz), "
+    // Сдвиг пика от ожидаемой частоты — расхождение опорных генераторов передатчика и приёмника
+    const double peakHz = toFrequency(peakBin);
+    logger.Info(std::format("Peak: {:.0f} Hz (expected {:.0f} Hz, offset {:.0f} Hz, resolution {:.0f} Hz), "
                             "{:.1f} dB above the median noise floor",
-                            toneHz, toneOffsetHz, toneHz - toneOffsetHz, binHz, toDb(power[toneBin] / noiseFloor)));
-    logger.Info(std::format("Strongest peak in band: {:.0f} Hz, {:.1f} dB above the median noise floor",
-                            toFrequency(peakBin), toDb(power[peakBin] / noiseFloor)));
+                            peakHz, toneOffsetHz, peakHz - toneOffsetHz, binHz, toDb(power[peakBin] / noiseFloor)));
 }
 
 int runTxRx(const CommandLineOptions& options)
