@@ -9,8 +9,6 @@ perf.data.old
 # macOS
 .DS_Store
 
-# Signal file written by radiocom_sim
-/test
 CLAUDE.md
 
 # Received signal file written by radiocom_txrx

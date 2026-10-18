@@ -39,20 +39,11 @@ add_subdirectory(src/modules/SignalFileIO)
 add_subdirectory(src/modules/SignalManipulation)
 add_subdirectory(src/modules/Sdr)
 
-add_library(SimulationCore STATIC
-    src/SimulationCore.cpp
-)
-target_include_directories(SimulationCore PUBLIC src)
-target_link_libraries(SimulationCore
-    PUBLIC SignalManipulation Logger
-    PRIVATE ProjectWarnings
-)
-
-add_executable(radiocom_sim
+add_executable(radiocom
     src/main.cpp
 )
-target_link_libraries(radiocom_sim
-    PRIVATE SimulationCore SignalManipulation SignalFileIO Logger ProjectWarnings
+target_link_libraries(radiocom
+    PRIVATE Sdr SignalManipulation SignalFileIO Logger ProjectWarnings
 )
 
 # Проверка передачи и приёма на Pluto SDR
@@ -63,4 +54,4 @@ target_link_libraries(radiocom_txrx
     PRIVATE Sdr SignalFileIO Logger PkgConfig::FFTW3 ProjectWarnings
 )
 
-install(TARGETS radiocom_sim RUNTIME DESTINATION bin)
+install(TARGETS radiocom RUNTIME DESTINATION bin)
