@@ -41,6 +41,7 @@ add_subdirectory(src/modules/Sdr)
 
 add_executable(radiocom
     src/main.cpp
+    src/Run.cpp
 )
 target_link_libraries(radiocom
     PRIVATE Sdr SignalManipulation SignalFileIO Logger ProjectWarnings

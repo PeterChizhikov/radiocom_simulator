@@ -78,9 +78,9 @@ UI (веб-интерфейс) планировался раньше, сейча
 | `Common` | типы `Sample_t`, `Signal_t`, `Bytes_t` |
 | `Logger` | интерфейс `ILogger`, реализация на spdlog |
 | `SignalFileIO` | сохранение и загрузка I/Q в файл (float32, как `gr_complex`), нужно для разбора записей `rx.iq` |
-| `SignalManipulation` | физический уровень: интерфейс `IPhyLayer` (`Modulate`, `FindSync`, `Demodulate`, `GetPayloadSize`) |
+| `SignalManipulation` | физический уровень: интерфейс `IPhyLayer` (`Modulate`, `FindSync`, `Demodulate`, `GetPayloadSize`); файлы: `Ofdm` — сетка, PSS, CRS, оценка канала, OFDM-модем; `ChannelCoding` — CRC, турбокод, согласование скорости, скремблирование, QPSK; `SignalManipulation.cpp` — класс `PhyLayer` с синхронизацией |
 | `Sdr` | `PlutoDevice`: настройка и передача/приём через libiio |
-| `src/main.cpp` | запускатель системы с ролями `bs` и `ue` |
+| `src/main.cpp`, `src/Run.cpp` | запускатель системы с ролями `bs` и `ue`: в `main.cpp` только вызов, разбор аргументов и роли в `Run.cpp` |
 | `src/txrx.cpp` | первый аппаратный тест: передача и приём тона |
 
 Сборка (при первой конфигурации нужна сеть: скачиваются spdlog и AFF3CT; AFF3CT добавляет около полутора минут к
@@ -255,7 +255,8 @@ brew install libiio`; на macOS поиск через `find_library`, так к
 
 ## 10. Как проверялось и как проверить заново
 
-Тестовые программы использовали внутренние функции `SignalManipulation.cpp` через `#include` самого файла `.cpp`.
+Тестовые программы использовали внутренние функции `SignalManipulation.cpp` через `#include` самого файла `.cpp`
+(теперь эти функции объявлены в `Ofdm.h` и `ChannelCoding.h`, их можно подключать как обычные заголовки).
 
 - **CRC:** вход «123456789» (байты, старший бит первым), ожидаемый остаток 0xCDE703; остаток после присоединения CRC равен 0.
 - **Турбокод:** независимый кодер по рис. 5.1.3-2: регистры s0, s1, s2; обратная связь a = c ⊕ s1 ⊕ s2, чётность
