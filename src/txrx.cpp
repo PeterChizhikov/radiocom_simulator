@@ -50,7 +50,7 @@ void printUsage(std::string_view programName)
     std::cout << "Usage: " << programName << " --tx <uri> [options]\n"
               << "  --tx <uri>           transmitting Pluto, e.g. usb:1.2.5\n"
               << "  --rx <uri>           receiving Pluto (default: same as --tx)\n"
-              << "  --tx-atten <db>      TX attenuation, 40..89.75 dB (default: 89.75)\n"
+              << "  --tx-atten <db>      TX attenuation, 0..89.75 dB (default: 89.75)\n"
               << "  --rx-gain <db>       manual RX gain, -3..71 dB (default: 0)\n"
               << "  --no-tx              receive only, to measure the noise floor\n"
               << "  --output <path>      file for the received I/Q signal (default: rx.iq)\n"

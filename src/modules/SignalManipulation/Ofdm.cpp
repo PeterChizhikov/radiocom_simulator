@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <numbers>
 #include <utility>
 
 #include <fftw3.h>
@@ -13,33 +12,19 @@ namespace Radiocom::SignalManipulation
 namespace
 {
 
-constexpr size_t zadoffChuLength = 63;
-constexpr size_t zadoffChuRoot = 25;
-
 constexpr size_t maxResourceBlocks = 110;
 constexpr size_t resourceBlocks = subcarrierCount / 12;
 constexpr size_t referencesPerSymbol = 2 * resourceBlocks;
 constexpr size_t goldOffset = 1600;
 
-// Последовательность Задова — Чу, как PSS в LTE (TS 36.211, 6.11.1.1)
-Signal_t generateSyncSequence()
-{
-    Signal_t sequence(syncLength);
-    for (size_t index = 0; index < syncLength; ++index)
-    {
-        // Показатель exp(-j*pi*e / 63) повторяется с периодом 2 * 63, поэтому e берётся по модулю
-        const size_t product = index < syncLength / 2 ? index * (index + 1) : (index + 1) * (index + 2);
-        const size_t exponent = zadoffChuRoot * product % (2 * zadoffChuLength);
-        sequence[index] = std::polar(1.0, -std::numbers::pi * double(exponent) / double(zadoffChuLength));
-    }
-    return sequence;
-}
-
-// Пилоты символа слота (TS 36.211, 6.10.1.1): r(m'), m' = m + 110 - 15
-Signal_t generateReferenceSequence(size_t symbol)
+// Пилоты символа субкадра (TS 36.211 V16.2.0, 6.10.1.1): r(m'), m' = m + 110 - 15,
+// c_init = 2^10 * (7 * (n_s + 1) + l + 1) * (2 * N_ID^cell + 1) + 2 * N_ID^cell + N_CP
+Signal_t generateReferenceSequence(size_t subframe, size_t symbol)
 {
     constexpr size_t normalCyclicPrefix = 1;
-    const uint32_t initialValue = uint32_t((1U << 10) * (7 * (slotNumber + 1) + symbol + 1) * (2 * cellId + 1) +
+    const size_t slot = slotsPerSubframe * subframe + symbol / symbolsPerSlot;
+    const size_t slotSymbol = symbol % symbolsPerSlot;
+    const uint32_t initialValue = uint32_t((1U << 10) * (7 * (slot + 1) + slotSymbol + 1) * (2 * cellId + 1) +
                                            2 * cellId + normalCyclicPrefix);
     const auto gold = generateGoldSequence(initialValue, 4 * maxResourceBlocks);
 
@@ -53,20 +38,16 @@ Signal_t generateReferenceSequence(size_t symbol)
     return sequence;
 }
 
-// Линейная интерполяция по частоте между пилотами, за крайними пилотами — линейная экстраполяция
-Subcarriers_t interpolateInFrequency(std::span<const size_t> positions, std::span<const Sample_t> gains)
+// Линейная интерполяция между соседними узлами, за крайними узлами — линейная экстраполяция
+template <typename Value_t>
+Value_t interpolate(std::span<const size_t> positions, std::span<const Value_t> values, size_t point)
 {
-    Subcarriers_t channel;
-    for (size_t subcarrier = 0; subcarrier < subcarrierCount; ++subcarrier)
-    {
-        const auto next = std::upper_bound(positions.begin(), positions.end(), subcarrier);
-        const size_t upper = std::clamp(size_t(next - positions.begin()), size_t(1), positions.size() - 1);
-        const size_t lower = upper - 1;
-        const double fraction = (double(subcarrier) - double(positions[lower])) /
-                                (double(positions[upper]) - double(positions[lower]));
-        channel[subcarrier] = gains[lower] + (gains[upper] - gains[lower]) * fraction;
-    }
-    return channel;
+    const auto next = std::upper_bound(positions.begin(), positions.end(), point);
+    const size_t upper = std::clamp(size_t(next - positions.begin()), size_t(1), positions.size() - 1);
+    const size_t lower = upper - 1;
+    const double fraction =
+        (double(point) - double(positions[lower])) / (double(positions[upper]) - double(positions[lower]));
+    return values[lower] + (values[upper] - values[lower]) * fraction;
 }
 
 } // namespace
@@ -95,17 +76,15 @@ std::vector<uint8_t> generateGoldSequence(uint32_t initialValue, size_t length)
     return sequence;
 }
 
-void mapSyncSignal(ResourceGrid_t& grid)
-{
-    const Signal_t sequence = generateSyncSequence();
-    std::copy(sequence.begin(), sequence.end(), grid[syncSymbol].begin() + std::ptrdiff_t(syncFirstSubcarrier));
-}
-
-void mapReferenceSignals(ResourceGrid_t& grid)
+void mapReferenceSignals(ResourceGrid_t& grid, size_t subframe, size_t symbolCount)
 {
     for (const size_t symbol : referenceSymbols)
     {
-        const Signal_t sequence = generateReferenceSequence(symbol);
+        if (symbol >= symbolCount)
+        {
+            continue;
+        }
+        const Signal_t sequence = generateReferenceSequence(subframe, symbol);
         for (size_t index = 0; index < referencesPerSymbol; ++index)
         {
             grid[symbol][referenceSpacing * index + referenceShift(symbol)] = sequence[index];
@@ -113,15 +92,14 @@ void mapReferenceSignals(ResourceGrid_t& grid)
     }
 }
 
-ResourceGrid_t estimateChannel(const ResourceGrid_t& received)
+ResourceGrid_t estimateChannel(const ResourceGrid_t& received, size_t subframe)
 {
     ResourceGrid_t reference{};
-    mapReferenceSignals(reference);
+    mapReferenceSignals(reference, subframe, symbolsPerSubframe);
 
-    std::array<Subcarriers_t, referenceSymbols.size()> estimates;
-    for (size_t index = 0; index < referenceSymbols.size(); ++index)
+    std::array<Signal_t, subcarrierCount> estimates;
+    for (const size_t symbol : referenceSymbols)
     {
-        const size_t symbol = referenceSymbols[index];
         std::vector<size_t> positions;
         Signal_t gains;
         for (size_t subcarrier = 0; subcarrier < subcarrierCount; ++subcarrier)
@@ -132,18 +110,18 @@ ResourceGrid_t estimateChannel(const ResourceGrid_t& received)
                 gains.push_back(received[symbol][subcarrier] / reference[symbol][subcarrier]);
             }
         }
-        estimates[index] = interpolateInFrequency(positions, gains);
+        for (size_t subcarrier = 0; subcarrier < subcarrierCount; ++subcarrier)
+        {
+            estimates[subcarrier].push_back(interpolate<Sample_t>(positions, gains, subcarrier));
+        }
     }
 
     ResourceGrid_t channel{};
-    const double symbolDistance = double(referenceSymbols[1]) - double(referenceSymbols[0]);
-    for (size_t symbol = 0; symbol < symbolsPerSlot; ++symbol)
+    for (size_t symbol = 0; symbol < symbolsPerSubframe; ++symbol)
     {
-        const double weight = (double(symbol) - double(referenceSymbols[0])) / symbolDistance;
         for (size_t subcarrier = 0; subcarrier < subcarrierCount; ++subcarrier)
         {
-            channel[symbol][subcarrier] =
-                estimates[0][subcarrier] + (estimates[1][subcarrier] - estimates[0][subcarrier]) * weight;
+            channel[symbol][subcarrier] = interpolate<Sample_t>(referenceSymbols, estimates[subcarrier], symbol);
         }
     }
     return channel;
@@ -235,6 +213,28 @@ Subcarriers_t OfdmModem::Demodulate(std::span<const Sample_t> usefulPart)
         subcarriers[subcarrier] = m_frequencyBuffer[frequencyBin(subcarrier)];
     }
     return subcarriers;
+}
+
+Signal_t OfdmModem::ModulateSubframe(const ResourceGrid_t& grid)
+{
+    Signal_t subframe;
+    subframe.reserve(subframeLength);
+    for (size_t symbol = 0; symbol < symbolsPerSubframe; ++symbol)
+    {
+        const Signal_t samples = Modulate(grid[symbol], cyclicPrefixLength(symbol));
+        subframe.insert(subframe.end(), samples.begin(), samples.end());
+    }
+    return subframe;
+}
+
+ResourceGrid_t OfdmModem::DemodulateSubframe(std::span<const Sample_t> subframe)
+{
+    ResourceGrid_t grid;
+    for (size_t symbol = 0; symbol < symbolsPerSubframe; ++symbol)
+    {
+        grid[symbol] = Demodulate(subframe.subspan(symbolOffset(symbol) + cyclicPrefixLength(symbol), fftSize));
+    }
+    return grid;
 }
 
 } // namespace Radiocom::SignalManipulation

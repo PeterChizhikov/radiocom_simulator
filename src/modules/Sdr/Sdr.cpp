@@ -17,14 +17,14 @@ namespace Radiocom::Sdr
 namespace
 {
 
-// Предохранитель приёмного тракта: меньшее ослабление передатчика не допускается
-constexpr double minTxAttenuationDb = 40.0;
+constexpr double minTxAttenuationDb = 0.0;
 constexpr double maxTxAttenuationDb = 89.75;
 
 // ЦАП 12-битный, отсчёт выровнен по старшим битам int16
 constexpr double txFullScale = 2047.0 * 16.0;
 // АЦП 12-битный, отсчёт выровнен по младшим битам int16
 constexpr double rxFullScale = 2048.0;
+constexpr size_t discardedBuffers = 1;
 
 std::string describeError(int error)
 {
@@ -182,6 +182,15 @@ std::optional<Signal_t> PlutoDevice::Receive(size_t sampleCount)
 {
     iio_channel_enable(m_rxI);
     iio_channel_enable(m_rxQ);
+    // С несколькими буферами ядра DMA пишет следующий буфер, пока предыдущий идёт по USB, и эта передача наводит
+    // помеху на приёмный тракт в первой половине записи. С одним буфером запись и передача не перекрываются
+    const int kernelBuffersResult = iio_device_set_kernel_buffers_count(m_rxDevice, 1);
+    if (kernelBuffersResult < 0)
+    {
+        m_logger->Error(std::format("Cannot set the RX kernel buffer count to 1: {}",
+                                    describeError(-kernelBuffersResult)));
+        return std::nullopt;
+    }
     const Buffer_t buffer(iio_device_create_buffer(m_rxDevice, sampleCount, false), iio_buffer_destroy);
     if (buffer == nullptr)
     {
@@ -189,8 +198,8 @@ std::optional<Signal_t> PlutoDevice::Receive(size_t sampleCount)
         return std::nullopt;
     }
 
-    // Первый буфер отбрасываем: он мог начаться до того, как сигнал установился
-    for (size_t i = 0; i < 2; ++i)
+    // Первые буферы отбрасываем: сразу после включения приёма сигнал ещё не установился
+    for (size_t i = 0; i < discardedBuffers + 1; ++i)
     {
         const ssize_t received = iio_buffer_refill(buffer.get());
         if (received < 0)

@@ -10,6 +10,8 @@
 #include <cstdlib>
 #include <format>
 #include <iostream>
+#include <string>
+#include <vector>
 
 
 namespace Radiocom::Launcher
@@ -17,8 +19,7 @@ namespace Radiocom::Launcher
 namespace
 {
 
-constexpr std::string_view testMessage = "radiocom-test-frame-1";
-constexpr size_t receiveSize = 65536;
+constexpr size_t receivedFrames = 2;
 constexpr double txPeakAmplitude = 0.5;
 
 std::optional<double> parseDouble(const char* text)
@@ -32,21 +33,43 @@ std::optional<double> parseDouble(const char* text)
     return value;
 }
 
-// Тестовое сообщение повторяется, пока не заполнит слот
-Radiocom::Bytes_t buildPayload(size_t size)
+std::optional<size_t> parseSize(const char* text)
 {
+    char* end = nullptr;
+    const unsigned long long value = std::strtoull(text, &end, 10);
+    if (end == text || *end != '\0' || text[0] == '-')
+    {
+        return std::nullopt;
+    }
+    return size_t(value);
+}
+
+// Тестовое сообщение с номером субкадра повторяется, пока не заполнит транспортный блок
+Radiocom::Bytes_t buildPayload(size_t size, size_t subframe)
+{
+    const std::string message = std::format("radiocom subframe {} ", subframe);
     Radiocom::Bytes_t payload(size);
     for (size_t index = 0; index < size; ++index)
     {
-        payload[index] = uint8_t(testMessage[index % testMessage.size()]);
+        payload[index] = uint8_t(message[index % message.size()]);
     }
     return payload;
+}
+
+std::vector<Radiocom::Bytes_t> buildPayloads(const SignalManipulation::IPhyLayer& phy)
+{
+    std::vector<Radiocom::Bytes_t> payloads;
+    for (const size_t subframe : phy.GetDataSubframes())
+    {
+        payloads.push_back(buildPayload(phy.GetPayloadSize(), subframe));
+    }
+    return payloads;
 }
 
 // Базовая станция передаёт кадр циклически, пока не нажат Enter
 int runBaseStation(Sdr::PlutoDevice& device, SignalManipulation::IPhyLayer& phy, Logging::ILogger& logger)
 {
-    auto frame = phy.Modulate(buildPayload(phy.GetPayloadSize()));
+    auto frame = phy.Modulate(buildPayloads(phy));
     if (!frame.has_value())
     {
         return EXIT_FAILURE;
@@ -67,7 +90,9 @@ int runBaseStation(Sdr::PlutoDevice& device, SignalManipulation::IPhyLayer& phy,
         return EXIT_FAILURE;
     }
 
-    logger.Info(std::format("Transmitting a frame of {} samples, press Enter to stop", frame->size()));
+    logger.Info(std::format("Transmitting a frame of {} samples with {} transport blocks of {} bytes, "
+                            "press Enter to stop",
+                            frame->size(), phy.GetDataSubframes().size(), phy.GetPayloadSize()));
     std::cin.get();
     device.StopTransmit();
     return EXIT_SUCCESS;
@@ -88,14 +113,15 @@ void logSignalLevel(const Radiocom::Signal_t& signal, Logging::ILogger& logger)
                             maxComponent >= 0.999 ? " — CLIPPING, lower the RX gain" : ""));
 }
 
-// Число ошибочных кодовых бит до декодирования; эталон получаем демодуляцией кадра без шума
-void logBitErrors(SignalManipulation::IPhyLayer& phy,
-                  std::span<const Radiocom::Sample_t> signal,
-                  const SignalManipulation::SyncPeak& peak,
-                  Logging::ILogger& logger)
+// По каждому субкадру: число ошибочных кодовых бит до декодирования (эталон — демодуляция кадра без шума) и верно ли
+// принято сообщение
+void logFrameResults(SignalManipulation::IPhyLayer& phy,
+                     std::span<const Radiocom::Sample_t> signal,
+                     const SignalManipulation::SyncPeak& peak,
+                     Logging::ILogger& logger)
 {
-    const Radiocom::Bytes_t payload = buildPayload(phy.GetPayloadSize());
-    const auto cleanFrame = phy.Modulate(payload);
+    const auto payloads = buildPayloads(phy);
+    const auto cleanFrame = phy.Modulate(payloads);
     if (!cleanFrame.has_value())
     {
         return;
@@ -107,14 +133,25 @@ void logBitErrors(SignalManipulation::IPhyLayer& phy,
         return;
     }
 
-    size_t errorCount = 0;
-    for (size_t index = 0; index < reference->codedBits.size(); ++index)
+    size_t correctBlocks = 0;
+    for (size_t index = 0; index < received->size(); ++index)
     {
-        errorCount += reference->codedBits[index] != received->codedBits[index] ? 1 : 0;
+        const auto& expected = (*reference)[index];
+        const auto& actual = (*received)[index];
+        size_t errorCount = 0;
+        for (size_t bit = 0; bit < expected.codedBits.size(); ++bit)
+        {
+            errorCount += expected.codedBits[bit] != actual.codedBits[bit] ? 1 : 0;
+        }
+        const bool isMessageCorrect = actual.payload.has_value() && *actual.payload == payloads[index];
+        correctBlocks += isMessageCorrect ? 1 : 0;
+        logger.Info(std::format("Subframe {}: coded bit errors before decoding {} of {} ({:.2f} %), "
+                                "CRC ok and message correct: {}",
+                                actual.subframe, errorCount, expected.codedBits.size(),
+                                100.0 * double(errorCount) / double(expected.codedBits.size()), isMessageCorrect));
     }
-    const bool isMessageCorrect = received->payload.has_value() && *received->payload == payload;
-    logger.Info(std::format("Coded bit errors before decoding: {} of {}, CRC ok and message correct: {}", errorCount,
-                            reference->codedBits.size(), isMessageCorrect));
+    logger.Info(std::format("Frame: {} of {} transport blocks correct, {} payload bits per 10 ms", correctBlocks,
+                            received->size(), correctBlocks * phy.GetPayloadSize() * 8));
 }
 
 // Абонент принимает окно сигнала и сохраняет его для разбора
@@ -123,7 +160,8 @@ int runSubscriber(Sdr::PlutoDevice& device,
                   const CommandLineOptions& options,
                   std::shared_ptr<Logging::ILogger> logger)
 {
-    const auto received = device.Receive(receiveSize);
+    // Окно из двух кадров всегда содержит целый кадр
+    const auto received = device.Receive(receivedFrames * phy.GetFrameLength());
     if (!received.has_value())
     {
         return EXIT_FAILURE;
@@ -132,9 +170,9 @@ int runSubscriber(Sdr::PlutoDevice& device,
     logSignalLevel(*received, *logger);
     if (const auto peak = phy.FindSync(*received); peak.has_value())
     {
-        logger->Info(std::format("Slot starts at sample {}, correlation {:.3f}, frequency offset {:.0f} Hz",
+        logger->Info(std::format("Frame starts at sample {}, PSS correlation {:.3f}, frequency offset {:.0f} Hz",
                                  peak->position, peak->correlation, peak->frequencyOffsetHz));
-        logBitErrors(phy, *received, *peak, *logger);
+        logFrameResults(phy, *received, *peak, *logger);
     }
     SignalFileIO::BinaryFileSignalStorage storage(options.outputPath, std::move(logger));
     return storage.Save(*received) ? EXIT_SUCCESS : EXIT_FAILURE;
@@ -147,8 +185,9 @@ void printUsage(std::string_view programName)
     std::cout << "Usage: " << programName << " --role <bs|ue> --uri <uri> [options]\n"
               << "  --role <bs|ue>       bs - base station (transmits), ue - subscriber (receives)\n"
               << "  --uri <uri>          Pluto of this role, e.g. usb:1.2.5\n"
-              << "  --tx-atten <db>      TX attenuation, 40..89.75 dB (default: 89.75)\n"
+              << "  --tx-atten <db>      TX attenuation, 0..89.75 dB (default: 89.75)\n"
               << "  --rx-gain <db>       manual RX gain, -3..71 dB (default: 0)\n"
+              << "  --mcs <index>        MCS index 0..28, the same on both sides (default: 0)\n"
               << "  --output <path>      file for the received I/Q signal (default: rx.iq)\n"
               << "  -v, --verbose        enable trace logging\n"
               << "  -h, --help           show this help\n";
@@ -200,6 +239,17 @@ std::optional<CommandLineOptions> parseCommandLine(std::span<char*> args)
             options.outputPath = args[++i];
             continue;
         }
+        if (arg == "--mcs" && hasValue)
+        {
+            const auto value = parseSize(args[++i]);
+            if (!value.has_value())
+            {
+                std::cerr << "Invalid MCS index: " << args[i] << '\n';
+                return std::nullopt;
+            }
+            options.mcsIndex = *value;
+            continue;
+        }
         if ((arg == "--tx-atten" || arg == "--rx-gain") && hasValue)
         {
             const auto value = parseDouble(args[++i]);
@@ -243,7 +293,9 @@ int run(const CommandLineOptions& options)
         return EXIT_FAILURE;
     }
 
-    const auto phy = SignalManipulation::createPhyLayer(SignalManipulation::PhyConfig(), logger);
+    SignalManipulation::PhyConfig phyConfig;
+    phyConfig.mcsIndex = options.mcsIndex;
+    const auto phy = SignalManipulation::createPhyLayer(phyConfig, logger);
     if (phy == nullptr)
     {
         return EXIT_FAILURE;

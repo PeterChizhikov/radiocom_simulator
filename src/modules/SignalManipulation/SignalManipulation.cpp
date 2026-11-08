@@ -1,8 +1,10 @@
 #include "SignalManipulation.h"
 
 #include "ChannelCoding.h"
+#include "Frame.h"
 #include "Ofdm.h"
 
+#include <algorithm>
 #include <cmath>
 #include <format>
 #include <numbers>
@@ -19,56 +21,87 @@ constexpr size_t offsetEstimationPasses = 1;
 constexpr double searchRangeHz = 15'000.0;
 constexpr double hypothesisStepHz = 3'000.0;
 
+// Расстояние от начала символа SSS до начала символа PSS той же половины кадра
+constexpr size_t sssToPssDistance = frameSymbolOffset(pssSubframes[0], pssSymbol) - frameSymbolOffset(0, sssSymbol);
+
+// Согласование скорости и скремблирование одного субкадра с данными
+struct SubframeCoding
+{
+    size_t subframe = 0;
+    // Карта согласования скорости каждого кодового блока, длины E_r
+    std::vector<std::vector<size_t>> rateMatchingMaps;
+    // По одному биту на каждый из G бит субкадра
+    std::vector<uint8_t> scrambling;
+};
+
 class PhyLayer final : public IPhyLayer
 {
 public:
     PhyLayer(std::unique_ptr<OfdmModem> modem,
              std::unique_ptr<TurboCodec> turbo,
              std::shared_ptr<Logging::ILogger> logger,
-             double sampleRateHz)
+             double sampleRateHz,
+             ModulationAndCoding modulationAndCoding,
+             Segmentation segmentation)
         : m_modem(std::move(modem))
         , m_turbo(std::move(turbo))
         , m_logger(std::move(logger))
         , m_sampleRateHz(sampleRateHz)
+        , m_modulationAndCoding(modulationAndCoding)
+        , m_segmentation(segmentation)
+        , m_pss(generatePss())
     {
-        // Образец для поиска слота: символ с PSS, остальные поднесущие пусты
+        // Образец для поиска кадра: символ с PSS, остальные поднесущие пусты
         ResourceGrid_t syncGrid{};
-        mapSyncSignal(syncGrid);
-        m_syncSymbol = m_modem->Modulate(syncGrid[syncSymbol], cyclicPrefixLength(syncSymbol));
+        std::ranges::copy(m_pss, syncGrid[pssSymbol].begin() + std::ptrdiff_t(syncFirstSubcarrier));
+        m_pssSymbol = m_modem->Modulate(syncGrid[pssSymbol], cyclicPrefixLength(pssSymbol));
 
-        size_t dataElementCount = 0;
-        for (size_t symbol = 0; symbol < symbolsPerSlot; ++symbol)
+        for (size_t half = 0; half < sssSubframes.size(); ++half)
         {
-            for (size_t subcarrier = 0; subcarrier < subcarrierCount; ++subcarrier)
-            {
-                dataElementCount += isDataElement(symbol, subcarrier) ? 1 : 0;
-            }
+            m_sss[half] = generateSss(sssSubframes[half]);
         }
 
-        // E = N_L * Q_m * G' при одном кодовом блоке, одном слое и QPSK (TS 36.212 V15.2.1, 5.1.4.1.2): все биты слота
-        const size_t outputLength = dataElementCount * bitsPerSymbol;
-        m_rateMatchingMap = buildRateMatchingMap(m_turbo->GetStreamLength(), outputLength);
-        m_scrambling = generateGoldSequence(scramblingInit, outputLength);
+        // G — все биты элементов PDSCH субкадра, делятся между кодовыми блоками (TS 36.212 V15.2.1, 5.1.4.1.2)
+        const size_t modulationOrder = m_modulationAndCoding.modulationOrder;
+        for (const size_t subframe : dataSubframes)
+        {
+            const size_t availableBits = countDataElements(subframe) * modulationOrder;
+            SubframeCoding coding{
+                .subframe = subframe,
+                .rateMatchingMaps = {},
+                .scrambling = generateGoldSequence(scramblingInit(subframe), availableBits),
+            };
+            for (const size_t outputLength :
+                 rateMatchingOutputLengths(availableBits, modulationOrder, m_segmentation.blockCount))
+            {
+                coding.rateMatchingMaps.push_back(buildRateMatchingMap(m_turbo->GetStreamLength(), outputLength));
+            }
+            m_coding.push_back(std::move(coding));
+        }
     }
 
-    size_t GetPayloadSize() const override { return payloadBytes; }
+    size_t GetPayloadSize() const override { return m_modulationAndCoding.transportBlockSize / bitsPerByte; }
+
+    size_t GetFrameLength() const override { return frameLength; }
+
+    std::span<const size_t> GetDataSubframes() const override { return dataSubframes; }
 
     std::optional<SyncPeak> FindSync(std::span<const Sample_t> signal) override
     {
-        if (signal.size() < slotLength)
+        if (signal.size() < frameLength + sssToPssDistance)
         {
-            m_logger->Error(std::format("Signal of {} samples is shorter than a slot ({} samples)", signal.size(),
-                                        slotLength));
+            m_logger->Error(std::format("Signal of {} samples is shorter than a frame ({} samples)", signal.size(),
+                                        frameLength + sssToPssDistance));
             return std::nullopt;
         }
 
         // Сдвиг частоты смещает пик корреляции по времени, поэтому сначала перебираем гипотезы о сдвиге
-        SyncPeak peak;
+        PssPeak peak;
         double offsetHz = 0.0;
         for (double hypothesisHz = -searchRangeHz; hypothesisHz <= searchRangeHz; hypothesisHz += hypothesisStepHz)
         {
-            const SyncPeak candidate = findCorrelationPeak(removeFrequencyOffset(signal, hypothesisHz));
-            m_logger->Trace(std::format("Hypothesis {:.0f} Hz: slot at sample {}, correlation {:.3f}", hypothesisHz,
+            const PssPeak candidate = findPssPeak(removeFrequencyOffset(signal, hypothesisHz));
+            m_logger->Trace(std::format("Hypothesis {:.0f} Hz: PSS at sample {}, correlation {:.3f}", hypothesisHz,
                                         candidate.position, candidate.correlation));
             if (candidate.correlation > peak.correlation)
             {
@@ -78,87 +111,148 @@ public:
         }
 
         // У лучшей гипотезы остаточный сдвиг мал, и разность фаз половин оценивает его точно
+        Signal_t corrected;
         for (size_t pass = 0; pass < offsetEstimationPasses; ++pass)
         {
             offsetHz += estimateFrequencyOffset(removeFrequencyOffset(signal, offsetHz), peak.position);
-            peak = findCorrelationPeak(removeFrequencyOffset(signal, offsetHz));
-            m_logger->Trace(std::format("Pass {}: offset {:.0f} Hz, slot at sample {}, correlation {:.3f}", pass,
+            corrected = removeFrequencyOffset(signal, offsetHz);
+            peak = findPssPeak(corrected);
+            m_logger->Trace(std::format("Pass {}: offset {:.0f} Hz, PSS at sample {}, correlation {:.3f}", pass,
                                         offsetHz, peak.position, peak.correlation));
         }
-        peak.frequencyOffsetHz = offsetHz;
-        return peak;
-    }
 
-    std::optional<Signal_t> Modulate(std::span<const uint8_t> payload) override
-    {
-        if (payload.size() != payloadBytes)
+        const size_t half = detectHalfFrame(corrected, peak.position);
+        const size_t pssOffset = frameSymbolOffset(pssSubframes[half], pssSymbol);
+        const size_t frameStart = (peak.position + frameLength - pssOffset) % frameLength;
+        if (frameStart + frameLength > signal.size())
         {
-            m_logger->Error(std::format("Payload has to be {} bytes, got {}", payloadBytes, payload.size()));
+            m_logger->Error(std::format("Frame starting at sample {} does not fit into {} samples", frameStart,
+                                        signal.size()));
             return std::nullopt;
         }
+        return SyncPeak{
+            .position = frameStart,
+            .correlation = peak.correlation,
+            .frequencyOffsetHz = offsetHz,
+        };
+    }
 
-        const Bits_t block = attachCrc(bytesToBits(payload));
-        const Bits_t streams = m_turbo->Encode(block);
-        Bits_t codedBits(m_rateMatchingMap.size());
-        for (size_t index = 0; index < codedBits.size(); ++index)
+    std::optional<Signal_t> Modulate(std::span<const Bytes_t> payloads) override
+    {
+        if (payloads.size() != dataSubframes.size())
         {
-            codedBits[index] = streams[m_rateMatchingMap[index]] ^ m_scrambling[index];
+            m_logger->Error(std::format("Frame needs {} payloads, got {}", dataSubframes.size(), payloads.size()));
+            return std::nullopt;
         }
-        const Signal_t symbols = mapBitsToQpsk(codedBits);
-
-        ResourceGrid_t grid{};
-        mapSyncSignal(grid);
-        mapReferenceSignals(grid);
-        size_t nextSymbol = 0;
-        for (size_t symbol = 0; symbol < symbolsPerSlot; ++symbol)
+        for (const auto& payload : payloads)
         {
-            for (size_t subcarrier = 0; subcarrier < subcarrierCount; ++subcarrier)
+            if (payload.size() != GetPayloadSize())
             {
-                if (isDataElement(symbol, subcarrier))
-                {
-                    grid[symbol][subcarrier] = symbols[nextSymbol++];
-                }
+                m_logger->Error(std::format("Payload has to be {} bytes, got {}", GetPayloadSize(), payload.size()));
+                return std::nullopt;
             }
         }
 
-        Signal_t slot;
-        slot.reserve(slotLength);
-        for (size_t symbol = 0; symbol < symbolsPerSlot; ++symbol)
+        Signal_t frame;
+        frame.reserve(frameLength);
+        for (size_t subframe = 0; subframe < subframesPerFrame; ++subframe)
         {
-            const Signal_t samples = m_modem->Modulate(grid[symbol], cyclicPrefixLength(symbol));
-            slot.insert(slot.end(), samples.begin(), samples.end());
+            ResourceGrid_t grid{};
+            mapSignals(grid, subframe);
+            const auto coding = std::ranges::find(m_coding, subframe, &SubframeCoding::subframe);
+            if (coding != m_coding.end())
+            {
+                const Signal_t symbols = encode(payloads[size_t(coding - m_coding.begin())], *coding);
+                placeData(grid, subframe, symbols);
+            }
+            const Signal_t samples = m_modem->ModulateSubframe(grid);
+            frame.insert(frame.end(), samples.begin(), samples.end());
         }
-        m_logger->Trace(std::format("{} payload bytes -> {} block bits -> {} coded bits -> {} samples", payload.size(),
-                                    block.size(), codedBits.size(), slot.size()));
-        return slot;
+        m_logger->Trace(std::format("{} payloads of {} bytes -> frame of {} samples", payloads.size(),
+                                    GetPayloadSize(), frame.size()));
+        return frame;
     }
 
-    std::optional<ReceivedFrame> Demodulate(std::span<const Sample_t> frame, double frequencyOffsetHz) override
+    std::optional<std::vector<ReceivedSubframe>> Demodulate(std::span<const Sample_t> frame,
+                                                            double frequencyOffsetHz) override
     {
-        if (frame.size() < slotLength)
+        if (frame.size() < frameLength)
         {
-            m_logger->Error(std::format("Received signal of {} samples is shorter than a slot ({} samples)",
-                                        frame.size(), slotLength));
+            m_logger->Error(std::format("Received signal of {} samples is shorter than a frame ({} samples)",
+                                        frame.size(), frameLength));
             return std::nullopt;
         }
 
-        const Signal_t corrected = removeFrequencyOffset(frame.first(slotLength), frequencyOffsetHz);
-        ResourceGrid_t received;
-        for (size_t symbol = 0; symbol < symbolsPerSlot; ++symbol)
+        const Signal_t corrected = removeFrequencyOffset(frame.first(frameLength), frequencyOffsetHz);
+        std::vector<ReceivedSubframe> result;
+        for (const auto& coding : m_coding)
         {
-            const auto usefulPart =
-                std::span(corrected).subspan(symbolOffset(symbol) + cyclicPrefixLength(symbol), fftSize);
-            received[symbol] = m_modem->Demodulate(usefulPart);
+            const auto samples = std::span(corrected).subspan(coding.subframe * subframeLength, subframeLength);
+            result.push_back(decode(m_modem->DemodulateSubframe(samples), coding));
         }
+        return result;
+    }
 
-        const ResourceGrid_t channel = estimateChannel(received);
-        Signal_t dataSymbols;
-        Signal_t dataChannel;
-        for (size_t symbol = 0; symbol < symbolsPerSlot; ++symbol)
+private:
+    struct PssPeak
+    {
+        size_t position = 0;
+        double correlation = 0.0;
+    };
+
+    // Сегментация и CRC24B (TS 36.212 V15.2.1, 5.1.2), турбокод и согласование скорости каждого блока, конкатенация
+    // выходов блоков по порядку (5.1.5), скремблирование (TS 36.211 V16.2.0, 6.3.1), модуляция (7.1)
+    Signal_t encode(std::span<const uint8_t> payload, const SubframeCoding& coding)
+    {
+        const Bits_t transportBlock = attachCrc(bytesToBits(payload));
+        const size_t blockPayload = codeBlockPayloadSize(m_segmentation);
+        Bits_t codedBits;
+        codedBits.reserve(coding.scrambling.size());
+        for (size_t block = 0; block < m_segmentation.blockCount; ++block)
+        {
+            const auto segment = std::span(transportBlock).subspan(block * blockPayload, blockPayload);
+            const Bits_t codeBlock =
+                m_segmentation.blockCount == 1 ? Bits_t(segment.begin(), segment.end())
+                                               : attachCrc(segment, CrcType::CodeBlock);
+            const Bits_t streams = m_turbo->Encode(codeBlock);
+            for (const size_t position : coding.rateMatchingMaps[block])
+            {
+                codedBits.push_back(streams[position]);
+            }
+        }
+        for (size_t index = 0; index < codedBits.size(); ++index)
+        {
+            codedBits[index] ^= coding.scrambling[index];
+        }
+        return mapBits(codedBits, m_modulationAndCoding.modulationOrder);
+    }
+
+    // PDSCH заполняет элементы сначала по поднесущим, затем по символам (TS 36.211 V16.2.0, 6.3.5)
+    static void placeData(ResourceGrid_t& grid, size_t subframe, std::span<const Sample_t> symbols)
+    {
+        size_t next = 0;
+        for (size_t symbol = 0; symbol < symbolsPerSubframe; ++symbol)
         {
             for (size_t subcarrier = 0; subcarrier < subcarrierCount; ++subcarrier)
             {
-                if (isDataElement(symbol, subcarrier))
+                if (isDataElement(subframe, symbol, subcarrier))
+                {
+                    grid[symbol][subcarrier] = symbols[next++];
+                }
+            }
+        }
+    }
+
+    ReceivedSubframe decode(const ResourceGrid_t& received, const SubframeCoding& coding)
+    {
+        const ResourceGrid_t channel = estimateChannel(received, coding.subframe);
+        Signal_t dataSymbols;
+        Signal_t dataChannel;
+        for (size_t symbol = 0; symbol < symbolsPerSubframe; ++symbol)
+        {
+            for (size_t subcarrier = 0; subcarrier < subcarrierCount; ++subcarrier)
+            {
+                if (isDataElement(coding.subframe, symbol, subcarrier))
                 {
                     dataSymbols.push_back(received[symbol][subcarrier]);
                     dataChannel.push_back(channel[symbol][subcarrier]);
@@ -166,38 +260,59 @@ public:
             }
         }
 
-        std::vector<float> soft = demapSoft(dataSymbols, dataChannel);
+        std::vector<float> soft = demapSoft(dataSymbols, dataChannel, m_modulationAndCoding.modulationOrder);
         Bytes_t codedBits(soft.size());
         for (size_t index = 0; index < soft.size(); ++index)
         {
             codedBits[index] = soft[index] < 0.0F ? 1 : 0;
-            if (m_scrambling[index] != 0)
+            if (coding.scrambling[index] != 0)
             {
                 soft[index] = -soft[index];
             }
         }
 
-        // Повторно переданные биты (E больше числа бит буфера) складываются
-        std::vector<float> streams(turboStreamCount * m_turbo->GetStreamLength(), 0.0F);
-        for (size_t index = 0; index < soft.size(); ++index)
+        const size_t blockPayload = codeBlockPayloadSize(m_segmentation);
+        Bits_t transportBlock;
+        transportBlock.reserve(m_segmentation.blockCount * blockPayload);
+        size_t failedBlocks = 0;
+        size_t offset = 0;
+        for (const auto& rateMatchingMap : coding.rateMatchingMaps)
         {
-            streams[m_rateMatchingMap[index]] += soft[index];
+            // Повторно переданные биты (E больше числа бит буфера) складываются
+            std::vector<float> streams(turboStreamCount * m_turbo->GetStreamLength(), 0.0F);
+            for (size_t index = 0; index < rateMatchingMap.size(); ++index)
+            {
+                streams[rateMatchingMap[index]] += soft[offset + index];
+            }
+            offset += rateMatchingMap.size();
+
+            const auto block = m_turbo->Decode(streams);
+            if (!block.has_value() ||
+                (m_segmentation.blockCount > 1 && calculateCrc(*block, CrcType::CodeBlock) != 0))
+            {
+                ++failedBlocks;
+                transportBlock.insert(transportBlock.end(), blockPayload, 0);
+                continue;
+            }
+            transportBlock.insert(transportBlock.end(), block->begin(),
+                                  block->begin() + std::ptrdiff_t(blockPayload));
         }
 
         std::optional<Bytes_t> payload;
-        const auto block = m_turbo->Decode(streams);
-        if (block.has_value() && calculateCrc(*block) == 0)
+        if (failedBlocks == 0 && calculateCrc(transportBlock) == 0)
         {
-            payload = bitsToBytes(std::span(*block).first(codeBlockSize - crcLength));
+            payload = bitsToBytes(std::span(transportBlock).first(m_modulationAndCoding.transportBlockSize));
         }
-        m_logger->Trace(std::format("{} coded bits -> CRC ok: {}", codedBits.size(), payload.has_value()));
-        return ReceivedFrame{
+        m_logger->Trace(std::format("Subframe {}: {} coded bits, {} of {} code blocks failed -> CRC ok: {}",
+                                    coding.subframe, codedBits.size(), failedBlocks, m_segmentation.blockCount,
+                                    payload.has_value()));
+        return ReceivedSubframe{
+            .subframe = coding.subframe,
             .codedBits = std::move(codedBits),
             .payload = std::move(payload),
         };
     }
 
-private:
     Signal_t removeFrequencyOffset(std::span<const Sample_t> signal, double offsetHz) const
     {
         Signal_t corrected(signal.size());
@@ -209,30 +324,28 @@ private:
         return corrected;
     }
 
-    // Нормированная корреляция символа с PSS в каждой позиции слота, берётся лучшая
-    SyncPeak findCorrelationPeak(std::span<const Sample_t> signal) const
+    // Нормированная корреляция с символом PSS в каждой позиции, берётся лучшая; перед PSS должен помещаться SSS
+    PssPeak findPssPeak(std::span<const Sample_t> signal) const
     {
-        const size_t syncSize = m_syncSymbol.size();
-        double syncEnergy = 0.0;
-        for (const auto& sample : m_syncSymbol)
+        const size_t pssSize = m_pssSymbol.size();
+        double pssEnergy = 0.0;
+        for (const auto& sample : m_pssSymbol)
         {
-            syncEnergy += std::norm(sample);
+            pssEnergy += std::norm(sample);
         }
 
-        SyncPeak peak;
-        // Слот целиком должен помещаться в сигнал
-        for (size_t position = 0; position + slotLength <= signal.size(); ++position)
+        PssPeak peak;
+        for (size_t position = sssToPssDistance; position + pssSize <= signal.size(); ++position)
         {
-            const size_t syncStart = position + symbolOffset(syncSymbol);
             Sample_t product;
             double energy = 0.0;
-            for (size_t index = 0; index < syncSize; ++index)
+            for (size_t index = 0; index < pssSize; ++index)
             {
-                product += std::conj(m_syncSymbol[index]) * signal[syncStart + index];
-                energy += std::norm(signal[syncStart + index]);
+                product += std::conj(m_pssSymbol[index]) * signal[position + index];
+                energy += std::norm(signal[position + index]);
             }
             // По неравенству Коши — Буняковского значение не больше 1
-            const double correlation = energy > 0.0 ? std::sqrt(std::norm(product) / (syncEnergy * energy)) : 0.0;
+            const double correlation = energy > 0.0 ? std::sqrt(std::norm(product) / (pssEnergy * energy)) : 0.0;
             if (correlation > peak.correlation)
             {
                 peak.position = position;
@@ -243,28 +356,58 @@ private:
     }
 
     // Фаза между корреляциями двух половин PSS растёт на 2*pi*f*T, T — половина длительности
-    double estimateFrequencyOffset(std::span<const Sample_t> signal, size_t slotStart) const
+    double estimateFrequencyOffset(std::span<const Sample_t> signal, size_t pssStart) const
     {
-        const size_t halfSize = m_syncSymbol.size() / 2;
-        const size_t syncStart = slotStart + symbolOffset(syncSymbol);
+        const size_t halfSize = m_pssSymbol.size() / 2;
         Sample_t firstHalf;
         Sample_t secondHalf;
         for (size_t index = 0; index < halfSize; ++index)
         {
-            firstHalf += std::conj(m_syncSymbol[index]) * signal[syncStart + index];
-            secondHalf += std::conj(m_syncSymbol[halfSize + index]) * signal[syncStart + halfSize + index];
+            firstHalf += std::conj(m_pssSymbol[index]) * signal[pssStart + index];
+            secondHalf += std::conj(m_pssSymbol[halfSize + index]) * signal[pssStart + halfSize + index];
         }
         const double phase = std::arg(secondHalf * std::conj(firstHalf));
         return phase * m_sampleRateHz / (2.0 * std::numbers::pi * double(halfSize));
+    }
+
+    // SSS в субкадрах 0 и 5 разный (TS 36.211 V16.2.0, 6.11.2.1): канал оценивается по PSS, SSS сравнивается с обоими
+    // вариантами; возвращает индекс в sssSubframes
+    size_t detectHalfFrame(std::span<const Sample_t> signal, size_t pssStart)
+    {
+        const size_t sssStart = pssStart - sssToPssDistance;
+        const Subcarriers_t pss =
+            m_modem->Demodulate(signal.subspan(pssStart + cyclicPrefixLength(pssSymbol), fftSize));
+        const Subcarriers_t sss =
+            m_modem->Demodulate(signal.subspan(sssStart + cyclicPrefixLength(sssSymbol), fftSize));
+
+        std::array<double, sssSubframes.size()> metrics{};
+        for (size_t half = 0; half < sssSubframes.size(); ++half)
+        {
+            Sample_t sum;
+            for (size_t index = 0; index < syncLength; ++index)
+            {
+                const size_t subcarrier = syncFirstSubcarrier + index;
+                const Sample_t channel = pss[subcarrier] / m_pss[index];
+                sum += sss[subcarrier] * std::conj(channel) * std::conj(m_sss[half][index]);
+            }
+            metrics[half] = sum.real();
+        }
+        const size_t half = metrics[1] > metrics[0] ? 1 : 0;
+        m_logger->Trace(std::format("SSS metrics: subframe 0 {:.3g}, subframe 5 {:.3g} -> subframe {}", metrics[0],
+                                    metrics[1], sssSubframes[half]));
+        return half;
     }
 
     std::unique_ptr<OfdmModem> m_modem;
     std::unique_ptr<TurboCodec> m_turbo;
     std::shared_ptr<Logging::ILogger> m_logger;
     double m_sampleRateHz;
-    Signal_t m_syncSymbol;
-    std::vector<size_t> m_rateMatchingMap;
-    std::vector<uint8_t> m_scrambling;
+    ModulationAndCoding m_modulationAndCoding;
+    Segmentation m_segmentation;
+    Signal_t m_pss;
+    Signal_t m_pssSymbol;
+    std::array<Signal_t, sssSubframes.size()> m_sss;
+    std::vector<SubframeCoding> m_coding;
 };
 
 } // namespace
@@ -276,6 +419,28 @@ std::unique_ptr<IPhyLayer> createPhyLayer(const PhyConfig& config, std::shared_p
         return nullptr;
     }
 
+    const auto modulationAndCoding = findModulationAndCoding(config.mcsIndex);
+    if (!modulationAndCoding.has_value())
+    {
+        logger->Error(std::format("Cannot create PHY layer: MCS index {} is out of 0..{}", config.mcsIndex,
+                                  maxMcsIndex));
+        return nullptr;
+    }
+    const size_t blockBits = modulationAndCoding->transportBlockSize + crcLength;
+    const auto segmentation = segmentTransportBlock(blockBits);
+    if (!segmentation.has_value())
+    {
+        logger->Error(std::format("Cannot create PHY layer: transport block of {} bits cannot be segmented",
+                                  blockBits));
+        return nullptr;
+    }
+    if (!isSupportedModulation(modulationAndCoding->modulationOrder))
+    {
+        logger->Error(std::format("Cannot create PHY layer: MCS {} has unsupported modulation order Q_m = {}",
+                                  config.mcsIndex, modulationAndCoding->modulationOrder));
+        return nullptr;
+    }
+
     auto modem = OfdmModem::Create();
     if (modem == nullptr)
     {
@@ -283,14 +448,19 @@ std::unique_ptr<IPhyLayer> createPhyLayer(const PhyConfig& config, std::shared_p
         return nullptr;
     }
 
-    auto turbo = TurboCodec::Create(codeBlockSize);
+    auto turbo = TurboCodec::Create(segmentation->blockSize);
     if (turbo == nullptr)
     {
-        logger->Error(std::format("Cannot create PHY layer: turbo codec for block size {} failed", codeBlockSize));
+        logger->Error(std::format("Cannot create PHY layer: turbo codec for block size {} failed",
+                                  segmentation->blockSize));
         return nullptr;
     }
 
-    return std::make_unique<PhyLayer>(std::move(modem), std::move(turbo), std::move(logger), config.sampleRateHz);
+    logger->Info(std::format("MCS {}: Q_m = {}, transport block {} bits, {} code block(s) of K = {}", config.mcsIndex,
+                             modulationAndCoding->modulationOrder, modulationAndCoding->transportBlockSize,
+                             segmentation->blockCount, segmentation->blockSize));
+    return std::make_unique<PhyLayer>(std::move(modem), std::move(turbo), std::move(logger), config.sampleRateHz,
+                                      *modulationAndCoding, *segmentation);
 }
 
 } // namespace Radiocom::SignalManipulation

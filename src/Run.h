@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <optional>
 #include <span>
 #include <string>
@@ -23,6 +24,8 @@ struct CommandLineOptions
     std::string uri;
     double txAttenuationDb = 89.75;
     double rxGainDb = 0.0;
+    // I_MCS, одинаковый у базовой станции и абонента: управляющего канала нет
+    size_t mcsIndex = 0;
     std::string outputPath = "rx.iq";
 };
 

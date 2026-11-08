@@ -22,6 +22,7 @@ add_library(SignalManipulation STATIC
     SignalManipulation.cpp
     ChannelCoding.cpp
     Ofdm.cpp
+    Frame.cpp
 )
 target_include_directories(SignalManipulation PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(SignalManipulation

@@ -4,6 +4,7 @@
 #include <array>
 #include <cmath>
 #include <exception>
+#include <limits>
 
 
 namespace Radiocom::SignalManipulation
@@ -11,9 +12,10 @@ namespace Radiocom::SignalManipulation
 namespace
 {
 
-// g(D) = D^24 + D^23 + D^18 + D^17 + D^14 + D^11 + D^10 + D^7 + D^6 + D^5 + D^4 + D^3 + D + 1, здесь без члена D^24
-// (TS 36.212 V15.2.1, 5.1.1)
-constexpr uint32_t crcPolynomial = 0x864CFB;
+// g_CRC24A(D) = D^24 + D^23 + D^18 + D^17 + D^14 + D^11 + D^10 + D^7 + D^6 + D^5 + D^4 + D^3 + D + 1,
+// g_CRC24B(D) = D^24 + D^23 + D^6 + D^5 + D + 1, здесь без члена D^24 (TS 36.212 V15.2.1, 5.1.1)
+constexpr uint32_t crc24APolynomial = 0x864CFB;
+constexpr uint32_t crc24BPolynomial = 0x800063;
 constexpr uint32_t crcMask = (1U << crcLength) - 1;
 
 // Два составных кодера с передаточной функцией [1, g1(D)/g0(D)], g0(D) = 1 + D^2 + D^3, g1(D) = 1 + D + D^3,
@@ -33,14 +35,61 @@ constexpr std::array<size_t, subblockColumns> columnPermutation = {0, 16, 8,  24
 constexpr size_t redundancyVersion = 0;
 constexpr size_t nullPosition = SIZE_MAX;
 
-constexpr double qpskAmplitude = 0.707;
+// Q_m и I_TBS для I_MCS = 0..28 (TS 36.213 V17.1.0, табл. 7.1.7.1-1)
+constexpr std::array<size_t, maxMcsIndex + 1> mcsModulationOrders = {2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 4, 4, 4, 4, 4,
+                                                                     4, 4, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6};
+constexpr std::array<size_t, maxMcsIndex + 1> mcsTbsIndices = {0,  1,  2,  3,  4,  5,  6,  7,  8,  9,
+                                                               9,  10, 11, 12, 13, 14, 15, 15, 16, 17,
+                                                               18, 19, 20, 21, 22, 23, 24, 25, 26};
+// Размер транспортного блока для I_TBS = 0..26 при N_PRB = 15 (TS 36.213 V17.1.0, табл. 7.1.7.2.1-1)
+constexpr std::array<size_t, 27> transportBlockSizes = {392,  520,  648,  872,  1064, 1320, 1544, 1800, 2088,
+                                                        2344, 2664, 2984, 3368, 3880, 4264, 4584, 4968, 5352,
+                                                        5992, 6456, 6968, 7480, 7992, 8504, 9144, 9528, 11064};
 
-constexpr std::array<Sample_t, 4> qpskConstellation = {
-    Sample_t(qpskAmplitude, qpskAmplitude),
-    Sample_t(-qpskAmplitude, qpskAmplitude),
-    Sample_t(qpskAmplitude, -qpskAmplitude),
-    Sample_t(-qpskAmplitude, -qpskAmplitude),
-};
+// Z и длина CRC кодового блока L (TS 36.212 V15.2.1, 5.1.2)
+constexpr size_t maxCodeBlockSize = 6144;
+constexpr size_t codeBlockCrcLength = 24;
+
+// Уровни одной оси созвездия, индекс — биты этой оси: бит j индекса — j-й бит оси в группе (для I это b(i + 2j),
+// для Q — b(i + 2j + 1)). Таблицы 7.1.2-1, 7.1.3-1, 7.1.4-1 (TS 36.211 V16.2.0) записываются как код Грея по оси:
+// знак задаёт первый бит (0 — плюс), модуль — остальные: 1 бит: 1 или 3; 2 бита: 00 — 3, 01 — 1, 10 — 5, 11 — 7.
+// В общем виде t = 1, затем t = 2^(n - j) - (1 - 2 b_j) * t для j = n-1..1, уровень (1 - 2 b_0) * t. Нормировка
+// 1/sqrt(2), 1/sqrt(10), 1/sqrt(42) — средняя мощность символа 1, то есть 1/sqrt(2 (M - 1) / 3) при M = 2^Q_m
+std::vector<double> axisLevels(size_t modulationOrder)
+{
+    const size_t axisBits = modulationOrder / 2;
+    const double pointCount = double(size_t(1) << modulationOrder);
+    const double scale = 1.0 / std::sqrt(2.0 * (pointCount - 1.0) / 3.0);
+
+    std::vector<double> levels(size_t(1) << axisBits);
+    for (size_t pattern = 0; pattern < levels.size(); ++pattern)
+    {
+        const auto sign = [&](size_t bit) { return ((pattern >> bit) & 1U) != 0 ? -1.0 : 1.0; };
+        double magnitude = 1.0;
+        for (size_t bit = axisBits - 1; bit >= 1; --bit)
+        {
+            magnitude = double(size_t(1) << (axisBits - bit)) - (sign(bit) * magnitude);
+        }
+        levels[pattern] = scale * sign(0) * magnitude;
+    }
+    return levels;
+}
+
+// Биты одной оси группы из Q_m бит: offset 0 — ось I, 1 — ось Q
+size_t axisPattern(std::span<const uint8_t> group, size_t offset)
+{
+    size_t pattern = 0;
+    for (size_t bit = 0; (2 * bit) + offset < group.size(); ++bit)
+    {
+        pattern |= size_t(group[(2 * bit) + offset] & 1U) << bit;
+    }
+    return pattern;
+}
+
+double nearestLevel(std::span<const double> levels, double value)
+{
+    return *std::ranges::min_element(levels, {}, [&](double level) { return std::abs(value - level); });
+}
 
 // AFF3CT выдаёт слово [x | хвост x | z | хвост z | хвост x' | z' | хвост z'], где x — информационные биты, z и z' —
 // чётность первого и второго кодера, x' — информационные биты второго кодера; хвосты по три бита.
@@ -78,6 +127,54 @@ std::vector<size_t> buildTurboLayout(size_t blockSize)
 
 } // namespace
 
+std::optional<ModulationAndCoding> findModulationAndCoding(size_t mcsIndex)
+{
+    if (mcsIndex > maxMcsIndex)
+    {
+        return std::nullopt;
+    }
+    return ModulationAndCoding{
+        .modulationOrder = mcsModulationOrders[mcsIndex],
+        .transportBlockSize = transportBlockSizes[mcsTbsIndices[mcsIndex]],
+    };
+}
+
+bool isTurboBlockSize(size_t blockSize)
+{
+    struct Range
+    {
+        size_t first;
+        size_t last;
+        size_t step;
+    };
+    constexpr std::array<Range, 4> ranges = {{{40, 512, 8}, {528, 1024, 16}, {1056, 2048, 32}, {2112, 6144, 64}}};
+    return std::ranges::any_of(ranges, [&](const Range& range)
+                               { return blockSize >= range.first && blockSize <= range.last &&
+                                        (blockSize - range.first) % range.step == 0; });
+}
+
+std::optional<Segmentation> segmentTransportBlock(size_t bitCount)
+{
+    // C = 1 без CRC блока при B <= Z, иначе C = ceil(B / (Z - L)) и B' = B + C * L (5.1.2)
+    const size_t blockCount =
+        bitCount <= maxCodeBlockSize ? 1 : (bitCount + maxCodeBlockSize - codeBlockCrcLength - 1) /
+                                               (maxCodeBlockSize - codeBlockCrcLength);
+    const size_t totalBits = blockCount == 1 ? bitCount : bitCount + blockCount * codeBlockCrcLength;
+
+    // K+ — наименьший K из табл. 5.1.3-3, при котором C * K >= B'; все блоки размера K+ только при C * K+ == B',
+    // тогда F = 0 и C_- = 0
+    size_t blockSize = (totalBits + blockCount - 1) / blockCount;
+    while (blockSize <= maxCodeBlockSize && !isTurboBlockSize(blockSize))
+    {
+        ++blockSize;
+    }
+    if (blockSize > maxCodeBlockSize || blockCount * blockSize != totalBits)
+    {
+        return std::nullopt;
+    }
+    return Segmentation{.blockCount = blockCount, .blockSize = blockSize};
+}
+
 Bits_t bytesToBits(std::span<const uint8_t> bytes)
 {
     Bits_t bits;
@@ -102,8 +199,22 @@ Bytes_t bitsToBytes(std::span<const uint8_t> bits)
     return bytes;
 }
 
-uint32_t calculateCrc(std::span<const uint8_t> bits)
+std::vector<size_t> rateMatchingOutputLengths(size_t availableBits, size_t modulationOrder, size_t blockCount)
 {
+    const size_t symbolCount = availableBits / modulationOrder;
+    const size_t remainder = symbolCount % blockCount;
+    std::vector<size_t> lengths;
+    for (size_t block = 0; block < blockCount; ++block)
+    {
+        const size_t symbols = (symbolCount / blockCount) + (block + remainder >= blockCount ? 1 : 0);
+        lengths.push_back(modulationOrder * symbols);
+    }
+    return lengths;
+}
+
+uint32_t calculateCrc(std::span<const uint8_t> bits, CrcType type)
+{
+    const uint32_t polynomial = type == CrcType::TransportBlock ? crc24APolynomial : crc24BPolynomial;
     uint32_t remainder = 0;
     for (const uint8_t bit : bits)
     {
@@ -111,15 +222,15 @@ uint32_t calculateCrc(std::span<const uint8_t> bits)
         remainder = (remainder << 1) & crcMask;
         if (feedback != 0)
         {
-            remainder ^= crcPolynomial;
+            remainder ^= polynomial;
         }
     }
     return remainder;
 }
 
-Bits_t attachCrc(std::span<const uint8_t> bits)
+Bits_t attachCrc(std::span<const uint8_t> bits, CrcType type)
 {
-    const uint32_t remainder = calculateCrc(bits);
+    const uint32_t remainder = calculateCrc(bits, type);
     Bits_t block(bits.begin(), bits.end());
     for (size_t index = 0; index < crcLength; ++index)
     {
@@ -230,38 +341,69 @@ std::vector<size_t> buildRateMatchingMap(size_t streamLength, size_t outputLengt
     return map;
 }
 
-Signal_t mapBitsToQpsk(std::span<const uint8_t> bits)
+bool isSupportedModulation(size_t modulationOrder)
 {
+    return modulationOrder == 2 || modulationOrder == 4 || modulationOrder == 6;
+}
+
+Signal_t mapBits(std::span<const uint8_t> bits, size_t modulationOrder)
+{
+    const std::vector<double> levels = axisLevels(modulationOrder);
     Signal_t symbols;
-    symbols.reserve(bits.size() / bitsPerSymbol);
-    for (size_t index = 0; index + 1 < bits.size(); index += bitsPerSymbol)
+    symbols.reserve(bits.size() / modulationOrder);
+    for (size_t index = 0; index + modulationOrder <= bits.size(); index += modulationOrder)
     {
-        symbols.push_back(qpskConstellation[size_t(bits[index] | (bits[index + 1] << 1))]);
+        const auto group = bits.subspan(index, modulationOrder);
+        symbols.emplace_back(levels[axisPattern(group, 0)], levels[axisPattern(group, 1)]);
     }
     return symbols;
 }
 
-std::vector<float> demapSoft(std::span<const Sample_t> received, std::span<const Sample_t> channel)
+std::vector<float> demapSoft(std::span<const Sample_t> received,
+                             std::span<const Sample_t> channel,
+                             size_t modulationOrder)
 {
     constexpr double minNoiseVariance = 1e-12;
+    const std::vector<double> levels = axisLevels(modulationOrder);
+    const size_t axisBits = modulationOrder / 2;
 
+    // Выровненный символ Y / H и мощность канала |H|^2: в выровненной области шум оси имеет дисперсию sigma^2 / |H|^2
+    std::vector<Sample_t> equalized(received.size());
+    std::vector<double> gains(received.size());
     double errorEnergy = 0.0;
     for (size_t index = 0; index < received.size(); ++index)
     {
-        const Sample_t matched = received[index] * std::conj(channel[index]);
-        const Sample_t nearest(std::copysign(qpskAmplitude, matched.real()), std::copysign(qpskAmplitude, matched.imag()));
+        gains[index] = std::norm(channel[index]);
+        equalized[index] = gains[index] > 0.0 ? received[index] / channel[index] : Sample_t();
+        const Sample_t nearest(nearestLevel(levels, equalized[index].real()),
+                               nearestLevel(levels, equalized[index].imag()));
         errorEnergy += std::norm(received[index] - channel[index] * nearest);
     }
     // Дисперсия одной квадратурной составляющей
     const double noiseVariance = std::max(errorEnergy / double(2 * received.size()), minNoiseVariance);
 
-    std::vector<float> soft;
-    soft.reserve(received.size() * bitsPerSymbol);
+    // LLR = |H|^2 * (min_{s: b = 1} (z - s)^2 - min_{s: b = 0} (z - s)^2) / (2 sigma^2); для QPSK это 2 A Re(Y H*) / sigma^2
+    std::vector<float> soft(received.size() * modulationOrder);
+    const auto demapAxis = [&](double value, double gain, size_t offset, std::span<float> output)
+    {
+        for (size_t bit = 0; bit < axisBits; ++bit)
+        {
+            std::array<double, 2> distances = {std::numeric_limits<double>::infinity(),
+                                               std::numeric_limits<double>::infinity()};
+            for (size_t pattern = 0; pattern < levels.size(); ++pattern)
+            {
+                const double distance = (value - levels[pattern]) * (value - levels[pattern]);
+                double& best = distances[(pattern >> bit) & 1U];
+                best = std::min(best, distance);
+            }
+            output[(2 * bit) + offset] = float(gain * (distances[1] - distances[0]) / (2.0 * noiseVariance));
+        }
+    };
     for (size_t index = 0; index < received.size(); ++index)
     {
-        const Sample_t matched = received[index] * std::conj(channel[index]);
-        soft.push_back(float(2.0 * qpskAmplitude * matched.real() / noiseVariance));
-        soft.push_back(float(2.0 * qpskAmplitude * matched.imag() / noiseVariance));
+        const auto output = std::span(soft).subspan(index * modulationOrder, modulationOrder);
+        demapAxis(equalized[index].real(), gains[index], 0, output);
+        demapAxis(equalized[index].imag(), gains[index], 1, output);
     }
     return soft;
 }

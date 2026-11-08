@@ -1,0 +1,30 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(./build/radiocom_txrx --tx usb:1.4.5 --rx usb:1.3.5 --tx-atten 50 --rx-gain 50 --output /private/tmp/claude-501/-Users-petr-Desktop-radiocom-sim-radiocom-simulator/5b0b7060-f27c-4c97-bb8c-7b0a7baca5c5/scratchpad/tone.iq)",
+      "Bash(./build/radiocom_txrx --tx usb:1.4.5 --rx usb:1.5.5 --tx-atten 50 --rx-gain 50 --output /private/tmp/claude-501/-Users-petr-Desktop-radiocom-sim-radiocom-simulator/5b0b7060-f27c-4c97-bb8c-7b0a7baca5c5/scratchpad/tone.iq)",
+      "Bash(python3 -c \"import numpy; print\\(numpy.__version__\\)\")",
+      "Bash(python3 -c \"import iio; print\\('pyiio ok'\\)\")",
+      "Read(//opt/homebrew/Cellar/libiio/0.23/Frameworks/iio.framework/Versions/0.23/Headers/**)",
+      "Bash(iio_attr -u usb:1.5.5 -c ad9361-phy voltage0)",
+      "Bash(iio_attr -u usb:1.5.5 -d ad9361-phy)",
+      "Bash(c++ -std=c++20 -O2 probe.cpp -o probe -F/opt/homebrew/Frameworks -framework iio -Wl,-rpath,/opt/homebrew/Frameworks)",
+      "Bash(./probe --uri usb:1.5.5 --n 76800 --buffers 4 --out noise.iq)",
+      "Bash(python3 profile.py noise.iq 76800)",
+      "Bash(c++ -std=c++20 -O2 probe.cpp -o probe -I/opt/homebrew/Frameworks/iio.framework/Headers -F/opt/homebrew/Frameworks -framework iio -Wl,-rpath,/opt/homebrew/Frameworks)",
+      "Bash(python3 -c ' *)",
+      "Bash(cmake --build build --target radiocom)",
+      "Bash(grep -E \"warning|error|Linking|Built target radiocom$\")",
+      "Bash(pkill -f \"radiocom --role bs\")",
+      "Bash(/Users/petr/Desktop/radiocom_sim/radiocom_simulator/build/radiocom_txrx --tx usb:1.4.5 --rx usb:1.5.5 --tx-atten 50 --rx-gain 50 --output txrx.iq)",
+      "Bash(/Users/petr/Desktop/radiocom_sim/radiocom_simulator/build/radiocom_txrx --tx usb:1.5.5 --rx usb:1.4.5 --tx-atten 50 --rx-gain 50 --output txrx2.iq)",
+      "Bash(cmake --build build --target radiocom radiocom_txrx)",
+      "Bash(cd /Users/petr/.claude/projects/-Users-petr-Desktop-radiocom-sim-radiocom-simulator/memory/ && cat no-design-docs.md no-full-rebuild.md)",
+      "Read(//Users/petr/.claude/projects/-Users-petr-Desktop-radiocom-sim-radiocom-simulator/memory/**)",
+      "Bash(sed -i '' 's/read\\(\\).splitlines\\(\\)/read\\(\\).split\\(\"\\\\\\\\n\"\\)/' parse_tables.py)",
+      "Bash(python3 -I parse_tables.py ../211.txt)",
+      "Bash(./test tables.txt)",
+      "Bash(grep -v \"^$\")"
+    ]
+  }
+}
