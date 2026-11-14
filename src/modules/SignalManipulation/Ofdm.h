@@ -87,8 +87,8 @@ std::vector<uint8_t> generateGoldSequence(uint32_t initialValue, size_t length);
 // CRS порта 0 субкадра в первых symbolCount символах (меньше 14 для DwPTS)
 void mapReferenceSignals(ResourceGrid_t& grid, size_t subframe, size_t symbolCount);
 
-// Оценка канала субкадра по CRS: отношение принятого к известному в пилотах, интерполяция по частоте, затем линейная
-// по времени между соседними пилотными символами (за последним — экстраполяция)
+// Оценка канала по CRS: частотное усреднение, оценка линейного вращения фазы за субкадр и совместное
+// усреднение пилотных символов после компенсации этого вращения; затем восстановление фазы каждого символа.
 ResourceGrid_t estimateChannel(const ResourceGrid_t& received, size_t subframe);
 
 // Владеет планом FFTW (fftw_plan — указатель на fftw_plan_s)

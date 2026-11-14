@@ -87,6 +87,12 @@ std::unique_ptr<PlutoDevice> PlutoDevice::Create(const PlutoConfig& config, std:
     }
 
     const iio_context* context = device->m_context.get();
+    const int timeoutResult = iio_context_set_timeout(device->m_context.get(), 1000);
+    if (timeoutResult < 0)
+    {
+        logger->Error(std::format("Cannot set IIO operation timeout: {}", describeError(-timeoutResult)));
+        return nullptr;
+    }
     const iio_device* phy = iio_context_find_device(context, "ad9361-phy");
     device->m_txDevice = iio_context_find_device(context, "cf-ad9361-dds-core-lpc");
     device->m_rxDevice = iio_context_find_device(context, "cf-ad9361-lpc");

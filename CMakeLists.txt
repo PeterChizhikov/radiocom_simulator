@@ -38,13 +38,14 @@ add_subdirectory(src/modules/Logger)
 add_subdirectory(src/modules/SignalFileIO)
 add_subdirectory(src/modules/SignalManipulation)
 add_subdirectory(src/modules/Sdr)
+add_subdirectory(src/modules/Link)
 
 add_executable(radiocom
     src/main.cpp
     src/Run.cpp
 )
 target_link_libraries(radiocom
-    PRIVATE Sdr SignalManipulation SignalFileIO Logger ProjectWarnings
+    PRIVATE Link Sdr SignalManipulation SignalFileIO Logger ProjectWarnings
 )
 
 # Проверка передачи и приёма на Pluto SDR

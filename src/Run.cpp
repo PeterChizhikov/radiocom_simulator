@@ -1,15 +1,18 @@
 #include "Run.h"
 
 #include "Logger.h"
+#include "Link.h"
 #include "Sdr.h"
 #include "SignalFileIO.h"
 #include "SignalManipulation.h"
 
 #include <algorithm>
+#include <cerrno>
 #include <cmath>
 #include <cstdlib>
 #include <format>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -36,8 +39,10 @@ std::optional<double> parseDouble(const char* text)
 std::optional<size_t> parseSize(const char* text)
 {
     char* end = nullptr;
+    errno = 0;
     const unsigned long long value = std::strtoull(text, &end, 10);
-    if (end == text || *end != '\0' || text[0] == '-')
+    if (end == text || *end != '\0' || text[0] == '-' || errno == ERANGE ||
+        value > std::numeric_limits<size_t>::max())
     {
         return std::nullopt;
     }
@@ -188,6 +193,9 @@ void printUsage(std::string_view programName)
               << "  --tx-atten <db>      TX attenuation, 0..89.75 dB (default: 89.75)\n"
               << "  --rx-gain <db>       manual RX gain, -3..71 dB (default: 0)\n"
               << "  --mcs <index>        MCS index 0..28, the same on both sides (default: 0)\n"
+              << "  --exchange           automatic TDD echo exchange instead of one-way operation\n"
+              << "  --count <number>     number of echo exchanges, 1..4294967295 (default: 100)\n"
+              << "  --attempts <number>  only 1 is allowed; retransmissions are disabled\n"
               << "  --output <path>      file for the received I/Q signal (default: rx.iq)\n"
               << "  -v, --verbose        enable trace logging\n"
               << "  -h, --help           show this help\n";
@@ -200,6 +208,24 @@ std::optional<CommandLineOptions> parseCommandLine(std::span<char*> args)
     {
         const std::string_view arg = args[i];
         const bool hasValue = i + 1 < args.size();
+
+        if (arg == "--exchange")
+        {
+            options.isExchange = true;
+            continue;
+        }
+        if ((arg == "--count" || arg == "--attempts") && hasValue)
+        {
+            const auto value = parseSize(args[++i]);
+            if (!value.has_value() || *value == 0 || *value > std::numeric_limits<uint32_t>::max() ||
+                (arg == "--attempts" && *value != 1))
+            {
+                std::cerr << "Invalid number for " << arg << ": " << args[i] << '\n';
+                return std::nullopt;
+            }
+            (arg == "--count" ? options.exchangeCount : options.maxAttempts) = *value;
+            continue;
+        }
 
         if (arg == "-h" || arg == "--help")
         {
@@ -299,6 +325,15 @@ int run(const CommandLineOptions& options)
     if (phy == nullptr)
     {
         return EXIT_FAILURE;
+    }
+
+    if (options.isExchange)
+    {
+        Link::LinkConfig config;
+        config.role = *options.role == Role::BaseStation ? Link::Role::BaseStation : Link::Role::Subscriber;
+        config.exchangeCount = options.exchangeCount;
+        config.maxAttempts = options.maxAttempts;
+        return Link::runExchange(*device, *phy, config, *logger) ? EXIT_SUCCESS : EXIT_FAILURE;
     }
 
     return *options.role == Role::BaseStation ? runBaseStation(*device, *phy, *logger)

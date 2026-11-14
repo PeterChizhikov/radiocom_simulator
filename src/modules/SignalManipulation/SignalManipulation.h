@@ -50,13 +50,18 @@ public:
     virtual std::optional<SyncPeak> FindSync(std::span<const Sample_t> signal) = 0;
 
     // Кадр TDD (тип 2, конфигурация UL/DL 1): в каждом субкадре из GetDataSubframes() транспортный блок
-    // CRC24A → турбокод → согласование скорости → скремблирование → модуляция; payloads — по одному на субкадр с данными,
+    // CRC24A → турбокод → согласование скорости → скремблирование → модуляция;
+    // payloads — по одному на субкадр с данными,
     // каждый размера GetPayloadSize()
     virtual std::optional<Signal_t> Modulate(std::span<const Bytes_t> payloads) = 0;
     // frame должен начинаться с первого отсчёта кадра; сдвиг частоты из FindSync убирается здесь.
     // Результат — по одному элементу на субкадр с данными
     virtual std::optional<std::vector<ReceivedSubframe>> Demodulate(std::span<const Sample_t> frame,
                                                                     double frequencyOffsetHz) = 0;
+    // Только для кадра с одинаковой нагрузкой во всех субкадрах с данными: сначала независимое декодирование,
+    // при неудаче — сумма мягких значений после дескремблирования и обратного согласования скорости.
+    virtual std::optional<Bytes_t> DemodulateRepeatedPayload(std::span<const Sample_t> frame,
+                                                            double frequencyOffsetHz) = 0;
 };
 
 struct PhyConfig

@@ -20,6 +20,9 @@ struct CommandLineOptions
 {
     bool isHelpRequested = false;
     bool isVerbose = false;
+    bool isExchange = false;
+    size_t exchangeCount = 100;
+    size_t maxAttempts = 1;
     std::optional<Role> role;
     std::string uri;
     double txAttenuationDb = 89.75;

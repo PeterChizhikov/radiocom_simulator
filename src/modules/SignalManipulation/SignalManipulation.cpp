@@ -193,6 +193,42 @@ public:
         return result;
     }
 
+    std::optional<Bytes_t> DemodulateRepeatedPayload(std::span<const Sample_t> frame,
+                                                    double frequencyOffsetHz) override
+    {
+        if (frame.size() < frameLength)
+        {
+            m_logger->Error(std::format("Repeated-payload frame needs {} samples, got {}", frameLength, frame.size()));
+            return std::nullopt;
+        }
+
+        const Signal_t corrected = removeFrequencyOffset(frame.first(frameLength), frequencyOffsetHz);
+        std::vector<std::vector<float>> combined(
+            m_segmentation.blockCount, std::vector<float>(turboStreamCount * m_turbo->GetStreamLength(), 0.0F));
+        for (const auto& coding : m_coding)
+        {
+            const auto samples = std::span(corrected).subspan(coding.subframe * subframeLength, subframeLength);
+            const auto streams = demapCodeBlocks(m_modem->DemodulateSubframe(samples), coding, nullptr);
+            if (auto payload = decodeTransportBlock(streams); payload.has_value())
+            {
+                return payload;
+            }
+            for (size_t block = 0; block < combined.size(); ++block)
+            {
+                for (size_t bit = 0; bit < combined[block].size(); ++bit)
+                {
+                    combined[block][bit] += streams[block][bit];
+                }
+            }
+        }
+        auto payload = decodeTransportBlock(combined);
+        if (payload.has_value())
+        {
+            m_logger->Debug("Payload decoded by combining the four subframe copies");
+        }
+        return payload;
+    }
+
 private:
     struct PssPeak
     {
@@ -243,7 +279,9 @@ private:
         }
     }
 
-    ReceivedSubframe decode(const ResourceGrid_t& received, const SubframeCoding& coding)
+    std::vector<std::vector<float>> demapCodeBlocks(const ResourceGrid_t& received,
+                                                   const SubframeCoding& coding,
+                                                   Bytes_t* codedBits)
     {
         const ResourceGrid_t channel = estimateChannel(received, coding.subframe);
         Signal_t dataSymbols;
@@ -261,20 +299,24 @@ private:
         }
 
         std::vector<float> soft = demapSoft(dataSymbols, dataChannel, m_modulationAndCoding.modulationOrder);
-        Bytes_t codedBits(soft.size());
+        if (codedBits != nullptr)
+        {
+            codedBits->resize(soft.size());
+        }
         for (size_t index = 0; index < soft.size(); ++index)
         {
-            codedBits[index] = soft[index] < 0.0F ? 1 : 0;
+            if (codedBits != nullptr)
+            {
+                (*codedBits)[index] = soft[index] < 0.0F ? 1 : 0;
+            }
             if (coding.scrambling[index] != 0)
             {
                 soft[index] = -soft[index];
             }
         }
 
-        const size_t blockPayload = codeBlockPayloadSize(m_segmentation);
-        Bits_t transportBlock;
-        transportBlock.reserve(m_segmentation.blockCount * blockPayload);
-        size_t failedBlocks = 0;
+        std::vector<std::vector<float>> codeBlocks;
+        codeBlocks.reserve(m_segmentation.blockCount);
         size_t offset = 0;
         for (const auto& rateMatchingMap : coding.rateMatchingMaps)
         {
@@ -285,26 +327,41 @@ private:
                 streams[rateMatchingMap[index]] += soft[offset + index];
             }
             offset += rateMatchingMap.size();
+            codeBlocks.push_back(std::move(streams));
+        }
+        return codeBlocks;
+    }
 
+    std::optional<Bytes_t> decodeTransportBlock(std::span<const std::vector<float>> codeBlocks)
+    {
+        const size_t blockPayload = codeBlockPayloadSize(m_segmentation);
+        Bits_t transportBlock;
+        transportBlock.reserve(m_segmentation.blockCount * blockPayload);
+        for (const auto& streams : codeBlocks)
+        {
             const auto block = m_turbo->Decode(streams);
             if (!block.has_value() ||
                 (m_segmentation.blockCount > 1 && calculateCrc(*block, CrcType::CodeBlock) != 0))
             {
-                ++failedBlocks;
-                transportBlock.insert(transportBlock.end(), blockPayload, 0);
-                continue;
+                return std::nullopt;
             }
             transportBlock.insert(transportBlock.end(), block->begin(),
                                   block->begin() + std::ptrdiff_t(blockPayload));
         }
 
-        std::optional<Bytes_t> payload;
-        if (failedBlocks == 0 && calculateCrc(transportBlock) == 0)
+        if (calculateCrc(transportBlock) != 0)
         {
-            payload = bitsToBytes(std::span(transportBlock).first(m_modulationAndCoding.transportBlockSize));
+            return std::nullopt;
         }
-        m_logger->Trace(std::format("Subframe {}: {} coded bits, {} of {} code blocks failed -> CRC ok: {}",
-                                    coding.subframe, codedBits.size(), failedBlocks, m_segmentation.blockCount,
+        return bitsToBytes(std::span(transportBlock).first(m_modulationAndCoding.transportBlockSize));
+    }
+
+    ReceivedSubframe decode(const ResourceGrid_t& received, const SubframeCoding& coding)
+    {
+        Bytes_t codedBits;
+        const auto streams = demapCodeBlocks(received, coding, &codedBits);
+        auto payload = decodeTransportBlock(streams);
+        m_logger->Trace(std::format("Subframe {}: {} coded bits, CRC ok: {}", coding.subframe, codedBits.size(),
                                     payload.has_value()));
         return ReceivedSubframe{
             .subframe = coding.subframe,

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <numbers>
 #include <utility>
 
 #include <fftw3.h>
@@ -16,6 +17,8 @@ constexpr size_t maxResourceBlocks = 110;
 constexpr size_t resourceBlocks = subcarrierCount / 12;
 constexpr size_t referencesPerSymbol = 2 * resourceBlocks;
 constexpr size_t goldOffset = 1600;
+// Проектное окно усреднения оценки канала по CRS: ±12 поднесущих, не требование стандарта LTE.
+constexpr size_t channelAveragingRadius = 2 * referenceSpacing;
 
 // Пилоты символа субкадра (TS 36.211 V16.2.0, 6.10.1.1): r(m'), m' = m + 110 - 15,
 // c_init = 2^10 * (7 * (n_s + 1) + l + 1) * (2 * N_ID^cell + 1) + 2 * N_ID^cell + N_CP
@@ -38,16 +41,47 @@ Signal_t generateReferenceSequence(size_t subframe, size_t symbol)
     return sequence;
 }
 
-// Линейная интерполяция между соседними узлами, за крайними узлами — линейная экстраполяция
-template <typename Value_t>
-Value_t interpolate(std::span<const size_t> positions, std::span<const Value_t> values, size_t point)
+std::array<Sample_t, symbolsPerSubframe> estimatePhaseRotations(
+    const std::array<Signal_t, subcarrierCount>& estimates)
 {
-    const auto next = std::upper_bound(positions.begin(), positions.end(), point);
-    const size_t upper = std::clamp(size_t(next - positions.begin()), size_t(1), positions.size() - 1);
-    const size_t lower = upper - 1;
-    const double fraction =
-        (double(point) - double(positions[lower])) / (double(positions[upper]) - double(positions[lower]));
-    return values[lower] + (values[upper] - values[lower]) * fraction;
+    std::array<double, referenceSymbols.size()> phases{};
+    double meanTime = 0.0;
+    double meanPhase = 0.0;
+    for (size_t index = 0; index < referenceSymbols.size(); ++index)
+    {
+        Sample_t product;
+        for (const auto& gains : estimates)
+        {
+            product += gains[index] * std::conj(gains.front());
+        }
+        const double phase = std::arg(product);
+        phases[index] = phase;
+        if (index > 0)
+        {
+            const double difference = std::remainder(phase - phases[index - 1], 2.0 * std::numbers::pi);
+            phases[index] = phases[index - 1] + difference;
+        }
+        meanTime += double(symbolOffset(referenceSymbols[index]));
+        meanPhase += phases[index];
+    }
+    meanTime /= double(referenceSymbols.size());
+    meanPhase /= double(referenceSymbols.size());
+
+    double numerator = 0.0;
+    double denominator = 0.0;
+    for (size_t index = 0; index < referenceSymbols.size(); ++index)
+    {
+        const double time = double(symbolOffset(referenceSymbols[index])) - meanTime;
+        numerator += time * (phases[index] - meanPhase);
+        denominator += time * time;
+    }
+    const double slope = numerator / denominator;
+    std::array<Sample_t, symbolsPerSubframe> rotations{};
+    for (size_t symbol = 0; symbol < symbolsPerSubframe; ++symbol)
+    {
+        rotations[symbol] = std::polar(1.0, meanPhase + slope * (double(symbolOffset(symbol)) - meanTime));
+    }
+    return rotations;
 }
 
 } // namespace
@@ -112,16 +146,36 @@ ResourceGrid_t estimateChannel(const ResourceGrid_t& received, size_t subframe)
         }
         for (size_t subcarrier = 0; subcarrier < subcarrierCount; ++subcarrier)
         {
-            estimates[subcarrier].push_back(interpolate<Sample_t>(positions, gains, subcarrier));
+            const size_t first = subcarrier > channelAveragingRadius ? subcarrier - channelAveragingRadius : 0;
+            const size_t last = std::min(subcarrier + channelAveragingRadius, subcarrierCount - 1);
+            Sample_t sum;
+            size_t count = 0;
+            for (size_t pilot = 0; pilot < positions.size(); ++pilot)
+            {
+                if (positions[pilot] >= first && positions[pilot] <= last)
+                {
+                    sum += gains[pilot];
+                    ++count;
+                }
+            }
+            estimates[subcarrier].push_back(sum / double(count));
         }
     }
 
+    // Проектная модель: за один субкадр канал постоянен, а общая фаза меняется линейно.
+    const auto rotations = estimatePhaseRotations(estimates);
     ResourceGrid_t channel{};
-    for (size_t symbol = 0; symbol < symbolsPerSubframe; ++symbol)
+    for (size_t subcarrier = 0; subcarrier < subcarrierCount; ++subcarrier)
     {
-        for (size_t subcarrier = 0; subcarrier < subcarrierCount; ++subcarrier)
+        Sample_t gain;
+        for (size_t index = 0; index < referenceSymbols.size(); ++index)
         {
-            channel[symbol][subcarrier] = interpolate<Sample_t>(referenceSymbols, estimates[subcarrier], symbol);
+            gain += estimates[subcarrier][index] * std::conj(rotations[referenceSymbols[index]]);
+        }
+        gain /= double(referenceSymbols.size());
+        for (size_t symbol = 0; symbol < symbolsPerSubframe; ++symbol)
+        {
+            channel[symbol][subcarrier] = gain * rotations[symbol];
         }
     }
     return channel;

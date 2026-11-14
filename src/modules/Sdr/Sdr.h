@@ -25,7 +25,7 @@ struct PlutoConfig
     int64_t centerFrequencyHz = 2'400'000'000;
     int64_t sampleRateHz = 3'840'000;
     int64_t rfBandwidthHz = 3'000'000;
-    // Ослабление передатчика в дБ (положительное число), меньше 40 дБ не принимается
+    // Ослабление передатчика в дБ, диапазон 0..89.75
     double txAttenuationDb = 89.75;
     // Ручное усиление приёмника, AGC выключен
     double rxGainDb = 0.0;
